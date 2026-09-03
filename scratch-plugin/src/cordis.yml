@@ -1,0 +1,7 @@
+- insert:
+    - id: deepseek-chat-tool
+      name: './deepseek-chat-tool.ts'
+    - id: kernel-agent-tool
+      name: './kernelagent-tool.ts'
+    - id: kernelagent-config-tool
+      name: './kernelagent-config-tool.ts'
