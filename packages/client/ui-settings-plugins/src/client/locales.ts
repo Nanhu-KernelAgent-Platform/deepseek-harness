@@ -11,6 +11,16 @@ export type PluginsSettingsLocaleKey =
   | 'webSearchTitle' | 'webSearchDescription'
   | 'webSearchApiKey' | 'webSearchApiKeyHint' | 'webSearchApiKeySet' | 'webSearchApiKeyUnset'
   | 'webSearchBaseUrl' | 'webSearchBaseUrlHint' | 'webSearchMaxUses' | 'webSearchMaxUsesHint'
+  | 'configToolTitle' | 'configToolDescription'
+  | 'configToolApiKey' | 'configToolApiKeyHint'
+  | 'configToolModelName' | 'configToolModelNameHint'
+  | 'configToolBaseUrl' | 'configToolBaseUrlHint'
+  | 'configToolIterations' | 'configToolIterationsHint'
+  | 'configToolWorkers' | 'configToolWorkersHint'
+  | 'configToolMaxRounds' | 'configToolMaxRoundsHint'
+  | 'configToolPlatform' | 'configToolPlatformHint'
+  | 'configToolKernelBackend' | 'configToolKernelBackendHint'
+  | 'configToolStrategy' | 'configToolStrategyHint'
 
 /** English copy. */
 export const en: Record<PluginsSettingsLocaleKey, string> = {
@@ -51,6 +61,26 @@ export const en: Record<PluginsSettingsLocaleKey, string> = {
   webSearchBaseUrlHint: 'Leave blank to use the provider default.',
   webSearchMaxUses: 'Max searches per request',
   webSearchMaxUsesHint: 'How many times one request may search before it must answer.',
+  configToolTitle: 'KernelAgent Tool Config',
+  configToolDescription: 'KernelAgent GPU kernel optimizer settings: LLM API key, model, endpoint, and optimization parameters.',
+  configToolApiKey: 'API key',
+  configToolApiKeyHint: 'Stored in plain text in the settings file for this deployment.',
+  configToolModelName: 'Model name',
+  configToolModelNameHint: 'Any model id your endpoint accepts, e.g. deepseek-chat or gpt-4o.',
+  configToolBaseUrl: 'API endpoint',
+  configToolBaseUrlHint: 'OpenAI-compatible chat-completions URL.',
+  configToolIterations: 'Iteration count',
+  configToolIterationsHint: 'Sequential API calls per tool invocation (1–10).',
+  configToolWorkers: 'Workers',
+  configToolWorkersHint: 'Parallel optimization threads (1–16).',
+  configToolMaxRounds: 'Max rounds',
+  configToolMaxRoundsHint: 'Maximum optimization iterations (1–50).',
+  configToolPlatform: 'Platform',
+  configToolPlatformHint: 'Target GPU platform: cuda / musa / rocm.',
+  configToolKernelBackend: 'Kernel backend',
+  configToolKernelBackendHint: 'Code generation backend: triton / cuda.',
+  configToolStrategy: 'Strategy',
+  configToolStrategyHint: 'Search strategy: beam_search / random_walk.',
 }
 
 /** Simplified Chinese copy. */
@@ -92,4 +122,24 @@ export const zh: Record<PluginsSettingsLocaleKey, string> = {
   webSearchBaseUrlHint: '留空则使用提供方默认地址。',
   webSearchMaxUses: '单次请求最多搜索次数',
   webSearchMaxUsesHint: '一次请求在必须作答前最多可以搜索多少次。',
+  configToolTitle: 'KernelAgent 工具配置',
+  configToolDescription: 'KernelAgent GPU Kernel 优化器配置：LLM API Key、模型、接口地址与优化参数。',
+  configToolApiKey: 'API Key',
+  configToolApiKeyHint: '以明文保存到本部署的 settings 配置文件。',
+  configToolModelName: '模型名称',
+  configToolModelNameHint: '接口支持的任意模型 ID，如 deepseek-chat、gpt-4o。',
+  configToolBaseUrl: 'API 地址',
+  configToolBaseUrlHint: 'OpenAI 兼容的 chat-completions 接口 URL。',
+  configToolIterations: '迭代次数',
+  configToolIterationsHint: '每次工具调用连续请求 API 的次数（1–10）。',
+  configToolWorkers: '工作线程数',
+  configToolWorkersHint: '并行优化的工作线程数（1–16）。',
+  configToolMaxRounds: '最大轮数',
+  configToolMaxRoundsHint: '最多执行多少轮优化迭代（1–50）。',
+  configToolPlatform: '目标平台',
+  configToolPlatformHint: '目标 GPU 平台：cuda / musa / rocm。',
+  configToolKernelBackend: 'Kernel 后端',
+  configToolKernelBackendHint: '代码生成后端：triton / cuda。',
+  configToolStrategy: '搜索策略',
+  configToolStrategyHint: '优化搜索策略：beam_search / random_walk。',
 }

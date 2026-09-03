@@ -111,3 +111,25 @@
   line-height: 1.5;
   color: var(--dsw-alias-label-tertiary);
 }
+
+.checkboxRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.checkboxRow:has(input:disabled) {
+  cursor: default;
+}
+
+.checkbox {
+  margin: 2px 0 0;
+  accent-color: var(--dsw-alias-brand-primary);
+}
+
+.checkboxLabel {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-secondary);
+}

@@ -121,3 +121,50 @@ export function SecretField(props: Pick<FieldProps, 'id' | 'label' | 'hint' | 't
     </div>
   )
 }
+
+/**
+ * A staged boolean field rendered as a checkbox.
+ * @param props - the field's copy, its staged value, and the edit actions.
+ * @returns the labelled control.
+ */
+export function BooleanField(props: Pick<FieldProps, 'id' | 'label' | 'hint' | 'text' | 'overridden' | 'disabled' | 'onEdit' | 'onReset'> & {
+  /** Copy for the overridden badge. */
+  overriddenLabel: string
+  /** Copy for the reset control. */
+  resetLabel: string
+}) {
+  const checked = props.text.trim().toLowerCase() === 'true'
+  return (
+    <div className={css.field}>
+      <div className={css.head}>
+        <label className={css.label} htmlFor={props.id}>{props.label}</label>
+        {props.overridden
+          ? (
+            <span className={css.badges}>
+              <span className={css.badge}>{props.overriddenLabel}</span>
+              <button
+                type="button"
+                className={css.reset}
+                disabled={props.disabled}
+                onClick={props.onReset}
+              >
+                {props.resetLabel}
+              </button>
+            </span>
+          )
+          : null}
+      </div>
+      <label className={css.checkboxRow}>
+        <input
+          id={props.id}
+          className={css.checkbox}
+          type="checkbox"
+          checked={checked}
+          disabled={props.disabled}
+          onChange={(event) => { props.onEdit(String(event.target.checked)) }}
+        />
+        <span className={css.checkboxLabel}>{props.hint}</span>
+      </label>
+    </div>
+  )
+}
