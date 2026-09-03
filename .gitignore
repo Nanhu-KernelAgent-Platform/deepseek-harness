@@ -39,3 +39,5 @@ apps/web/dist/
 worktrees/
 .agents/worktrees/
 .typert-*/
+scratch-plugin/src/secrets.json
+scratch-plugin/src/config.json
