@@ -21,9 +21,13 @@ export interface CodeBlockProps {
   copyLabel?: string | undefined
   /** Copy-button label during the post-copy confirmation window. */
   copiedLabel?: string | undefined
+  /** Download-button idle label. */
+  downloadLabel?: string | undefined
+  /** File name used for the downloaded file; omit to hide the download button. */
+  fileName?: string | undefined
 }
 
-export function CodeBlock({ code, lang, className, copyLabel = '复制', copiedLabel = '复制成功' }: CodeBlockProps) {
+export function CodeBlock({ code, lang, className, copyLabel = '复制', copiedLabel = '复制成功', downloadLabel = '下载', fileName }: CodeBlockProps) {
   const trimmed = code.endsWith('\n') ? code.slice(0, -1) : code
   // Re-render when a lazy grammar finishes loading, so a fence that showed plain
   // text while its language's grammar imported picks up highlighting. The
@@ -45,6 +49,19 @@ export function CodeBlock({ code, lang, className, copyLabel = '复制', copiedL
     })
   }, [copied, trimmed])
 
+  const onDownload = useCallback(() => {
+    if (!fileName) return
+    const blob = new Blob([code], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = fileName
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }, [code, fileName])
+
   const body = html === undefined
     ? (
       <pre className={css.plain}><code>{trimmed}</code></pre>
@@ -62,6 +79,11 @@ export function CodeBlock({ code, lang, className, copyLabel = '复制', copiedL
         <div className={css.banner}>
           <div className={css.infostring}>{lang ?? ''}</div>
           <div className={css.action}>
+            {fileName && (
+              <button type="button" className={css.downloadButton} onClick={onDownload}>
+                {downloadLabel}
+              </button>
+            )}
             <button type="button" className={css.copyButton} onClick={onCopy}>
               {copied ? copiedLabel : copyLabel}
             </button>

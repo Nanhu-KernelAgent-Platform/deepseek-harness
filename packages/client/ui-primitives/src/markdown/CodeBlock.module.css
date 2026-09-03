@@ -66,6 +66,16 @@
   font: inherit;
 }
 
+.downloadButton {
+  background-color: rgb(255 255 255 / 0);
+  border: none;
+  padding: 0;
+  margin: 0 12px 0 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
 .block :where(pre) {
   font: var(--dsl-code-block-content-font);
   padding: 16px;
