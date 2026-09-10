@@ -1,6 +1,7 @@
 - insert:
     - id: deepseek-chat-tool
       name: './deepseek-chat-tool.ts'
+      disabled: !!js '!process.env.DEEPSEEK_API_KEY'
     - id: kernel-agent-tool
       name: './kernelagent-tool.ts'
     - id: kernelagent-config-tool

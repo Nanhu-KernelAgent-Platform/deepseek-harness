@@ -4,7 +4,8 @@
 
 set -e
 
-HARNESS_DIR="${1:-/mnt/zj-data/data/tools/deepseek-harness}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+HARNESS_DIR="${1:-${SCRIPT_DIR}}"
 
 echo "========================================"
 echo " DeepSeek Harness Build"

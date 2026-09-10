@@ -1,21 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { dirname, resolve } from 'node:path'
-
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(__filename)
-
-// 读取密钥
-const secretsPath = resolve(__dirname, 'secrets.json')
-const secrets = JSON.parse(readFileSync(secretsPath, 'utf-8'))
-const apiKey: string = secrets.deepseekApiKey
+const apiKey = process.env.DEEPSEEK_API_KEY
 
 if (!apiKey) {
-  throw new Error('[deepseek-chat-tool] secrets.json 中缺少 deepseekApiKey')
+  throw new Error('[deepseek-chat-tool] Missing required environment variable: DEEPSEEK_API_KEY')
 }
-console.log('[deepseek-chat-tool] 已加载，API Key 前缀: ' + apiKey.substring(0, 10) + '...')
 
 export const name = 'deepseek-chat-tool'
 export const inject = ['tools', 'systemPrompt']
