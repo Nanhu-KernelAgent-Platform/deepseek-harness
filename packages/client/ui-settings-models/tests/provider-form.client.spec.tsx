@@ -33,6 +33,10 @@ const PiAiConfig = Schema.object({
       name: Schema.string(),
       contextWindow: Schema.number(),
       maxTokens: Schema.number(),
+      reasoningEfforts: Schema.union([
+        Schema.const(false),
+        Schema.dict(Schema.union([Schema.string(), Schema.const(null)])),
+      ]),
     })),
     reasoning: Schema.union(['off', 'high']),
   })),
@@ -215,6 +219,25 @@ describe('model list editing', () => {
       expectedRevision: 3,
       ops: [{ op: 'set', path: ['providers', 'openai', 'models'], value: [{ id: 'acme-large', contextWindow: 65_536 }] }],
     })
+  })
+
+  it('configures OpenAI-style reasoning levels per model', async () => {
+    const { mutate } = await mountSection()
+    openEditor('openai')
+
+    fireEvent.click(screen.getByRole('button', { name: en.addModel }))
+    fireEvent.change(screen.getByLabelText(`${en.modelId} 1`), { target: { value: 'gpt-compatible' } })
+    expandModel(1)
+    fireEvent.click(screen.getByLabelText(`${en.modelReasoningEfforts} low 1`))
+    fireEvent.click(screen.getByLabelText(`${en.modelReasoningEfforts} medium 1`))
+    fireEvent.click(screen.getByLabelText(`${en.modelReasoningEfforts} high 1`))
+    fireEvent.click(screen.getByText(en.apply))
+
+    await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+    expect(firstMutate(mutate).ops[0]?.value).toEqual([{
+      id: 'gpt-compatible',
+      reasoningEfforts: { low: 'low', medium: 'medium', high: 'high' },
+    }])
   })
 
   it('names a duplicate model id in the edit flow too', async () => {

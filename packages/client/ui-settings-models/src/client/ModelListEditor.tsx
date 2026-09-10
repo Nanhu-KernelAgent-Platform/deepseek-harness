@@ -116,6 +116,16 @@ function IconTrash(): ReactNode {
 /** The two token counts edited as K/M-suffixed text behind a row's disclosure. */
 type CapacityField = 'contextWindow' | 'maxTokens'
 
+/** OpenAI-style reasoning levels exposed by the Harness, in increasing order. */
+const REASONING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/** A model's configured reasoning-level map, or undefined when it inherits/declares none. */
+function reasoningEffortsOf(model: ModelDraft): Record<string, string | null> | undefined {
+  const value = model['reasoningEfforts']
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  return value as Record<string, string | null>
+}
+
 /**
  * What an empty capacity field is worth, shown as its placeholder so a row left
  * blank does not read as a model with no capacity at all.
@@ -210,7 +220,7 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
     })
   }
 
-  const patch = (index: number, next: Record<string, string | number | undefined>): void => {
+  const patch = (index: number, next: Record<string, unknown>): void => {
     onChange(models.map((model, at) => {
       if (at !== index) return model
       // Rebuilt rather than spread over: an emptied optional field has to leave
@@ -225,6 +235,13 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
         Object.entries({ ...model, ...next }).filter(([key]) => !cleared.has(key)),
       )
     }))
+  }
+
+  const toggleReasoningLevel = (index: number, level: typeof REASONING_LEVELS[number]): void => {
+    const current = reasoningEffortsOf(models[index] ?? { id: '' }) ?? {}
+    const next = Object.fromEntries(Object.entries(current).filter(([key]) => key !== level))
+    if (!Object.prototype.hasOwnProperty.call(current, level)) next[level] = level === 'off' ? null : level
+    patch(index, { reasoningEfforts: Object.keys(next).length === 0 ? undefined : next })
   }
 
   const fetchModels = async (): Promise<void> => {
@@ -429,6 +446,24 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
                     onChange={(event) => { editCapacity(index, 'maxTokens', event.target.value) }}
                   />
                 </label>
+                <fieldset className={`${styles['modelField']} ${styles['reasoningField']}`}>
+                  <legend className={styles['modelFieldLabel']}>{t('modelReasoningEfforts')}</legend>
+                  <span className={styles['modelFieldHint']}>{t('modelReasoningEffortsHint')}</span>
+                  <div className={styles['reasoningLevels']}>
+                    {REASONING_LEVELS.map(level => (
+                      <label key={level} className={styles['reasoningLevel']}>
+                        <input
+                          type="checkbox"
+                          checked={Object.prototype.hasOwnProperty.call(reasoningEffortsOf(model) ?? {}, level)}
+                          aria-label={`${t('modelReasoningEfforts')} ${level} ${index + 1}`}
+                          disabled={disabled}
+                          onChange={() => { toggleReasoningLevel(index, level) }}
+                        />
+                        <span>{level}</span>
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
               </div>
             )
             : null}
