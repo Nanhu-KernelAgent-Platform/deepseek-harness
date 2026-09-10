@@ -4,7 +4,7 @@
 export type PluginsSettingsLocaleKey =
   | 'nav' | 'title' | 'intro' | 'tabs' | 'configurableTab' | 'empty'
   | 'overridden' | 'reset' | 'readOnly' | 'expand' | 'collapse'
-  | 'save' | 'saving' | 'discard' | 'unsaved' | 'saveFailed' | 'invalidNumber'
+  | 'save' | 'saving' | 'discard' | 'unsaved' | 'saveFailed' | 'invalidNumber' | 'invalidValue'
   | 'bashTitle' | 'bashDescription' | 'bashTimeoutMs' | 'bashTimeoutMsHint'
   | 'bashMaxOutputBytes' | 'bashMaxOutputBytesHint'
   | 'agentLoopTitle' | 'agentLoopDescription' | 'agentLoopMaxParallel' | 'agentLoopMaxParallelHint'
@@ -15,12 +15,14 @@ export type PluginsSettingsLocaleKey =
   | 'configToolApiKey' | 'configToolApiKeyHint'
   | 'configToolModelName' | 'configToolModelNameHint'
   | 'configToolBaseUrl' | 'configToolBaseUrlHint'
-  | 'configToolIterations' | 'configToolIterationsHint'
   | 'configToolWorkers' | 'configToolWorkersHint'
   | 'configToolMaxRounds' | 'configToolMaxRoundsHint'
   | 'configToolPlatform' | 'configToolPlatformHint'
   | 'configToolKernelBackend' | 'configToolKernelBackendHint'
   | 'configToolStrategy' | 'configToolStrategyHint'
+  | 'configToolReasoningEffort' | 'configToolReasoningEffortHint'
+  | 'configToolVerify' | 'configToolVerifyHint'
+  | 'configToolExperienceMemory' | 'configToolExperienceMemoryHint'
 
 /** English copy. */
 export const en: Record<PluginsSettingsLocaleKey, string> = {
@@ -41,6 +43,7 @@ export const en: Record<PluginsSettingsLocaleKey, string> = {
   unsaved: 'Unsaved',
   saveFailed: 'The deployment did not accept these values; they were left for you to correct.',
   invalidNumber: 'Enter a number, or leave blank to use the default.',
+  invalidValue: 'Choose one of the supported values.',
   bashTitle: 'Shell',
   bashDescription: 'Limits every command the agent runs.',
   bashTimeoutMs: 'Command timeout (ms)',
@@ -66,21 +69,25 @@ export const en: Record<PluginsSettingsLocaleKey, string> = {
   configToolApiKey: 'API key',
   configToolApiKeyHint: 'Stored in plain text in the settings file for this deployment.',
   configToolModelName: 'Model name',
-  configToolModelNameHint: 'Any model id your endpoint accepts, e.g. deepseek-chat or gpt-4o.',
+  configToolModelNameHint: 'Any model id your endpoint accepts, e.g. deepseek-chat, gpt-4o, or grok-4.6.',
   configToolBaseUrl: 'API endpoint',
   configToolBaseUrlHint: 'OpenAI-compatible chat-completions URL.',
-  configToolIterations: 'Iteration count',
-  configToolIterationsHint: 'Sequential API calls per tool invocation (1–10).',
   configToolWorkers: 'Workers',
   configToolWorkersHint: 'Parallel optimization threads (1–16).',
   configToolMaxRounds: 'Max rounds',
   configToolMaxRoundsHint: 'Maximum optimization iterations (1–50).',
   configToolPlatform: 'Platform',
-  configToolPlatformHint: 'Target GPU platform: cuda / musa / rocm.',
+  configToolPlatformHint: 'Target GPU platform: cuda / musa / xpu.',
   configToolKernelBackend: 'Kernel backend',
-  configToolKernelBackendHint: 'Code generation backend: triton / cuda.',
+  configToolKernelBackendHint: 'Code generation backend: triton / musa.',
   configToolStrategy: 'Strategy',
-  configToolStrategyHint: 'Search strategy: beam_search / random_walk.',
+  configToolStrategyHint: 'Search strategy: beam_search / greedy.',
+  configToolReasoningEffort: 'Reasoning effort',
+  configToolReasoningEffortHint: 'OpenAI-compatible effort: none / low / medium / high / xhigh / max.',
+  configToolVerify: 'Correctness verification',
+  configToolVerifyHint: 'Verify generated output in flows that expose this switch.',
+  configToolExperienceMemory: 'Experience memory',
+  configToolExperienceMemoryHint: 'Reuse locally stored verified kernel experience.',
 }
 
 /** Simplified Chinese copy. */
@@ -101,6 +108,7 @@ export const zh: Record<PluginsSettingsLocaleKey, string> = {
   discard: '放弃修改',
   unsaved: '未保存',
   saveFailed: '本部署没有接受这些值，已保留供你修改。',
+  invalidValue: '请选择受支持的选项。',
   invalidNumber: '请填数字；留空表示使用默认值。',
   bashTitle: '终端',
   bashDescription: '限制 agent 运行的每一条命令。',
@@ -127,19 +135,23 @@ export const zh: Record<PluginsSettingsLocaleKey, string> = {
   configToolApiKey: 'API Key',
   configToolApiKeyHint: '以明文保存到本部署的 settings 配置文件。',
   configToolModelName: '模型名称',
-  configToolModelNameHint: '接口支持的任意模型 ID，如 deepseek-chat、gpt-4o。',
+  configToolModelNameHint: '接口支持的任意模型 ID，如 deepseek-chat、gpt-4o、grok-4.6。',
   configToolBaseUrl: 'API 地址',
   configToolBaseUrlHint: 'OpenAI 兼容的 chat-completions 接口 URL。',
-  configToolIterations: '迭代次数',
-  configToolIterationsHint: '每次工具调用连续请求 API 的次数（1–10）。',
   configToolWorkers: '工作线程数',
   configToolWorkersHint: '并行优化的工作线程数（1–16）。',
   configToolMaxRounds: '最大轮数',
   configToolMaxRoundsHint: '最多执行多少轮优化迭代（1–50）。',
   configToolPlatform: '目标平台',
-  configToolPlatformHint: '目标 GPU 平台：cuda / musa / rocm。',
+  configToolPlatformHint: '目标 GPU 平台：cuda / musa / xpu。',
   configToolKernelBackend: 'Kernel 后端',
-  configToolKernelBackendHint: '代码生成后端：triton / cuda。',
+  configToolKernelBackendHint: '代码生成后端：triton / musa。',
   configToolStrategy: '搜索策略',
-  configToolStrategyHint: '优化搜索策略：beam_search / random_walk。',
+  configToolStrategyHint: '优化搜索策略：beam_search / greedy。',
+  configToolReasoningEffort: '推理强度',
+  configToolReasoningEffortHint: 'OpenAI 兼容等级：none / low / medium / high / xhigh / max。',
+  configToolVerify: '正确性验证',
+  configToolVerifyHint: '在支持该开关的流程中验证生成结果。',
+  configToolExperienceMemory: '经验记忆',
+  configToolExperienceMemoryHint: '复用本地保存且验证通过的 Kernel 经验。',
 }

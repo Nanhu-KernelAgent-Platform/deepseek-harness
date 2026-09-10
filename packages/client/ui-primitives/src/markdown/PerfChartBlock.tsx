@@ -44,7 +44,7 @@ export function PerfChartBlock({ dataJson }: PerfChartBlockProps) {
     const chartW = cssWidth - padding.left - padding.right
     const chartH = cssHeight - padding.top - padding.bottom
 
-    const items = chartData.data ?? []
+    const items = chartData.data
     if (items.length === 0) {
       ctx.fillStyle = '#999'
       ctx.font = '14px sans-serif'
@@ -131,7 +131,7 @@ export function PerfChartBlock({ dataJson }: PerfChartBlockProps) {
 
     // Improvement badge
     if (chartData.improvement_pct !== undefined && chartData.improvement_pct !== null) {
-      const pct = Number(chartData.improvement_pct)
+      const pct = chartData.improvement_pct
       const badgeText = `Improvement: ${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`
       ctx.font = 'bold 13px sans-serif'
       const textW = ctx.measureText(badgeText).width

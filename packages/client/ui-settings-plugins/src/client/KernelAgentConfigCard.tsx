@@ -1,7 +1,7 @@
 /** The KernelAgent config card: API key, model name, API endpoint, and optimization params. */
 
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { ValueField } from './fields.tsx'
+import { BooleanField, SelectField, ValueField } from './fields.tsx'
 import { PluginCard } from './PluginCard.tsx'
 import type { ConfigToolCardFace } from './kernelagent-config-card-controller.ts'
 
@@ -42,7 +42,7 @@ export function KernelAgentConfigCard(props: ConfigToolCardProps) {
         hint={t('configToolModelNameHint')}
         overriddenLabel={t('overridden')}
         resetLabel={t('reset')}
-        invalidLabel={t('invalidNumber')}
+        invalidLabel={t('invalidValue')}
         disabled={disabled}
         placeholder="deepseek-chat"
         {...state.modelName}
@@ -55,25 +55,12 @@ export function KernelAgentConfigCard(props: ConfigToolCardProps) {
         hint={t('configToolBaseUrlHint')}
         overriddenLabel={t('overridden')}
         resetLabel={t('reset')}
-        invalidLabel={t('invalidNumber')}
+        invalidLabel={t('invalidValue')}
         disabled={disabled}
         placeholder="https://api.deepseek.com/v1/chat/completions"
         {...state.baseURL}
         onEdit={(text) => { props.edit('baseURL', text) }}
         onReset={() => { props.resetField('baseURL') }}
-      />
-      <ValueField
-        id="plugin-config-config-tool-iterations"
-        label={t('configToolIterations')}
-        hint={t('configToolIterationsHint')}
-        overriddenLabel={t('overridden')}
-        resetLabel={t('reset')}
-        invalidLabel={t('invalidNumber')}
-        numeric
-        disabled={disabled}
-        {...state.iterations}
-        onEdit={(text) => { props.edit('iterations', text) }}
-        onReset={() => { props.resetField('iterations') }}
       />
       <ValueField
         id="plugin-config-config-tool-workers"
@@ -101,44 +88,79 @@ export function KernelAgentConfigCard(props: ConfigToolCardProps) {
         onEdit={(text) => { props.edit('maxRounds', text) }}
         onReset={() => { props.resetField('maxRounds') }}
       />
-      <ValueField
+      <SelectField
         id="plugin-config-config-tool-platform"
         label={t('configToolPlatform')}
         hint={t('configToolPlatformHint')}
         overriddenLabel={t('overridden')}
         resetLabel={t('reset')}
-        invalidLabel={t('invalidNumber')}
+        invalidLabel={t('invalidValue')}
         disabled={disabled}
-        placeholder="musa"
+        options={['cuda', 'musa', 'xpu']}
         {...state.platform}
         onEdit={(text) => { props.edit('platform', text) }}
         onReset={() => { props.resetField('platform') }}
       />
-      <ValueField
+      <SelectField
         id="plugin-config-config-tool-kernel-backend"
         label={t('configToolKernelBackend')}
         hint={t('configToolKernelBackendHint')}
         overriddenLabel={t('overridden')}
         resetLabel={t('reset')}
-        invalidLabel={t('invalidNumber')}
+        invalidLabel={t('invalidValue')}
         disabled={disabled}
-        placeholder="triton"
+        options={['triton', 'musa']}
         {...state.kernelBackend}
         onEdit={(text) => { props.edit('kernelBackend', text) }}
         onReset={() => { props.resetField('kernelBackend') }}
       />
-      <ValueField
+      <SelectField
         id="plugin-config-config-tool-strategy"
         label={t('configToolStrategy')}
         hint={t('configToolStrategyHint')}
         overriddenLabel={t('overridden')}
         resetLabel={t('reset')}
-        invalidLabel={t('invalidNumber')}
+        invalidLabel={t('invalidValue')}
         disabled={disabled}
-        placeholder="beam_search"
+        options={['beam_search', 'greedy']}
         {...state.strategy}
         onEdit={(text) => { props.edit('strategy', text) }}
         onReset={() => { props.resetField('strategy') }}
+      />
+      <SelectField
+        id="plugin-config-config-tool-reasoning-effort"
+        label={t('configToolReasoningEffort')}
+        hint={t('configToolReasoningEffortHint')}
+        overriddenLabel={t('overridden')}
+        resetLabel={t('reset')}
+        invalidLabel={t('invalidValue')}
+        disabled={disabled}
+        options={['none', 'low', 'medium', 'high', 'xhigh', 'max']}
+        {...state.reasoningEffort}
+        onEdit={(text) => { props.edit('reasoningEffort', text) }}
+        onReset={() => { props.resetField('reasoningEffort') }}
+      />
+      <BooleanField
+        id="plugin-config-config-tool-verify"
+        label={t('configToolVerify')}
+        hint={t('configToolVerifyHint')}
+        overriddenLabel={t('overridden')}
+        resetLabel={t('reset')}
+        disabled={disabled}
+        {...state.verify}
+        onEdit={(text) => { props.edit('verify', text) }}
+        onReset={() => { props.resetField('verify') }}
+      />
+      <BooleanField
+        id="plugin-config-config-tool-experience-memory"
+        label={t('configToolExperienceMemory')}
+        hint={t('configToolExperienceMemoryHint')}
+        overriddenLabel={t('overridden')}
+        resetLabel={t('reset')}
+        disabled={disabled}
+        {...state.enableExperienceMemory}
+        onEdit={(text) => { props.edit('enableExperienceMemory', text) }}
+        onReset={() => { props.resetField('enableExperienceMemory') }}
       />
     </PluginCard>
   )

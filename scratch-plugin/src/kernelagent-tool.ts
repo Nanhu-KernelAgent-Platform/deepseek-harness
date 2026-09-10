@@ -1,83 +1,79 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import { spawn } from 'node:child_process'
-import { writeFileSync, readFileSync, mkdtempSync, existsSync, rmSync } from 'node:fs'
+import { writeFileSync, readFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
-
-// ESM-compatible __dirname polyfill (DSH loader runs files in ESM scope)
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(__filename)
+import { join } from 'node:path'
+import { CONFIG_TOOL_SETTINGS_NAMESPACE, resolveApiKey, type Config } from './kernelagent-config-tool.ts'
 
 // ========== Runtime configuration via environment variables ==========
 // These are injected by start_dsh.sh or the host environment.
 const PYTHON = process.env.KERNELAGENT_PYTHON || 'python3'
-const BRIDGE = process.env.KERNELAGENT_BRIDGE
-const CWD    = process.env.KERNELAGENT_WORKING_DIR
-
-if (!BRIDGE) {
-  throw new Error(
-    '[kernelagent-tool] Missing required environment variable: KERNELAGENT_BRIDGE.\n' +
-    'Please set it to the absolute path of kernelagent_bridge.py (e.g. /path/to/KernelAgent-from-git/kernelagent_bridge.py).'
-  )
+function requiredEnvironment(name: string): string {
+  const value = process.env[name]
+  if (!value) throw new Error(`[kernelagent-tool] Missing required environment variable: ${name}`)
+  return value
 }
-if (!CWD) {
-  throw new Error(
-    '[kernelagent-tool] Missing required environment variable: KERNELAGENT_WORKING_DIR.\n' +
-    'Please set it to the absolute path of the KernelAgent project root.'
-  )
+const BRIDGE = requiredEnvironment('KERNELAGENT_BRIDGE')
+const CWD = requiredEnvironment('KERNELAGENT_WORKING_DIR')
+
+function nonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim()
+  return normalized === '' ? undefined : normalized
 }
 
-/** Shared configuration file written by kernelagent-config-tool (non-sensitive fields only). */
-const KERNELAGENT_CONFIG_FILE = resolve(__dirname, 'config.json')
-
-/** Resolve API key from environment variables (secure, no file-based key storage). */
-function resolveApiKey(): string {
-  return process.env.KERNELAGENT_API_KEY
-    || process.env.OPENAI_API_KEY
-    || process.env.DEEPSEEK_API_KEY
-    || ''
+/** Settings are authoritative; tool-call fields are compatibility fallbacks. */
+export function mergeKernelAgentConfig(args: any, globalConfig: any) {
+  return {
+    model: nonEmptyString(globalConfig.modelName) ?? nonEmptyString(args.model) ?? 'deepseek-chat',
+    workers: globalConfig.workers ?? args.workers ?? 4,
+    max_rounds: globalConfig.maxRounds ?? args.max_rounds ?? 8,
+    verify: globalConfig.verify ?? args.verify ?? true,
+    platform: nonEmptyString(globalConfig.platform) ?? nonEmptyString(args.platform) ?? 'musa',
+    kernel_backend: nonEmptyString(globalConfig.kernelBackend) ?? nonEmptyString(args.kernel_backend) ?? 'musa',
+    reasoning_effort: nonEmptyString(globalConfig.reasoningEffort) ?? nonEmptyString(args.reasoning_effort) ?? 'high',
+    enable_experience_memory: globalConfig.enableExperienceMemory
+      ?? globalConfig.enable_experience_memory
+      ?? args.enable_experience_memory
+      ?? true,
+    strategy: nonEmptyString(globalConfig.strategy) ?? nonEmptyString(args.strategy) ?? 'beam_search',
+    baseURL: nonEmptyString(globalConfig.baseURL) ?? 'https://api.deepseek.com/v1/chat/completions',
+  }
 }
 
 export const name = 'kernelagent-tool'
-export const inject = ['tools', 'systemPrompt']
+export const inject = ['tools', 'systemPrompt', 'settings']
 
 export function apply(ctx: Context) {
   ctx.systemPrompt.section({
     name: 'tool:kernelagent',
     order: 210,
     text: `Use the kernelagent tool to generate, fuse, optimize GPU Triton kernels, or run a predefined example.
-Modes: generate | fuse | optimize | run_example
-- run_example: runs a predefined example (e.g. optimize_04_musa_sigmoid) and returns its artifacts.
-
-For run_example, your reply MUST contain BOTH of the following, in this order:
-1. A SHORT SUMMARY paragraph (in the user's language): run status (success/fallback), performance metrics (initial → best time, improvement), and 2-3 key observations about the generated kernel (e.g. vectorization strategy, memory access pattern).
-2. The COMPLETE code: output the entire contents of the "report" field VERBATIM, including all code blocks delimited by triple backticks (kernel.mu, kernel.py, binding.cpp, setup.py, optimized_kernel_musa.py). Do NOT summarize, paraphrase, truncate, or skip any code. Do not write "I will show the code" — just paste the report content after the summary so the user sees both the analysis and the actual generated kernel code in the chat.
-3. Performance chart: if the result contains a "perfchart_json" field, output a fenced code block with language "perfchart" and put the raw JSON string from "perfchart_json" inside it, like this:
-\`\`\`perfchart
-<the exact value of result.perfchart_json>
-\`\`\`
-The web UI will automatically render this as an interactive bar chart comparing PyTorch / Initial / Best kernel latency. Do NOT modify the JSON content — paste it exactly as provided.`,
+Modes: generate | fuse | optimize | run_example.
+Call the tool immediately without an announcement or progress preamble. After a successful call, always provide a short final answer in the user's language (2-4 sentences): summarize the requested operator and target platform, report the actual generation and correctness-verification outcome, and mention that the source files can be downloaded from the KernelAgent card above. Include optimization rounds or performance measurements only when returned by the tool. Tool success alone is not evidence that correctness verification passed or performance improved; if verification details are absent, say they were not reported. When no optimize call was performed, summarize correctness only and do not mention missing benchmarks or performance. After optimize, include the returned optimization timings and speedup, clearly distinguishing the initial-kernel baseline from the PyTorch baseline. Do not run additional benchmarks for the summary. On failure, briefly explain the returned error and any actionable next step supported by it.
+KernelAgent settings are authoritative. Do not override model, workers, rounds, platform, backend, strategy, reasoning effort, verification, or experience memory when settings are available.
+The KernelAgent tool card displays available generated source files and per-file download buttons. Do not reproduce the report or source code in your reply. The card opens itself; do not tell the user to expand it. The final answer must contain a useful result summary, not just internal reasoning or a statement that the tool succeeded.`,
   })
 
   const toolDef = defineTool({
     name: 'kernelagent',
     description: 'Generate, fuse, optimize GPU Triton kernels, or run a predefined example using KernelAgent (from-git).',
     parameters: {
-      mode: { type: 'string', required: true, description: 'Mode: generate, fuse, optimize, or run_example.' },
+      mode: { type: 'string', required: true, enum: ['generate', 'fuse', 'optimize', 'run_example'], description: 'Mode: generate, fuse, optimize, or run_example.' },
       example_name: { type: 'string', description: 'Example directory name for run_example mode (e.g. optimize_04_musa_sigmoid).' },
       problem_code: { type: 'string', description: 'PyTorch code or description. Required for generate/fuse/optimize.' },
       initial_kernel: { type: 'string', description: 'Required for optimize mode.' },
       test_code: { type: 'string', description: 'Optional test harness code.' },
-      model: { type: 'string', default: 'gpt-5' },
-      workers: { type: 'number', default: 4 },
-      max_rounds: { type: 'number', default: 8 },
-      platform: { type: 'string', default: 'cuda' },
-      kernel_backend: { type: 'string', default: 'triton' },
-      verify: { type: 'boolean', default: true },
-      enable_experience_memory: { type: 'boolean', default: true },
-      strategy: { type: 'string', default: 'beam_search' },
+      model: { type: 'string', description: 'Optional per-call model override. Omit to use KernelAgent settings.' },
+      workers: { type: 'number', description: 'Optional per-call worker override. Omit to use KernelAgent settings.' },
+      max_rounds: { type: 'number', description: 'Optional per-call maximum rounds override. Omit to use KernelAgent settings.' },
+      platform: { type: 'string', enum: ['cuda', 'musa', 'xpu'], description: 'Optional target platform override. Omit to use KernelAgent settings.' },
+      kernel_backend: { type: 'string', enum: ['triton', 'musa'], description: 'Optional code-generation backend override. Omit to use KernelAgent settings.' },
+      reasoning_effort: { type: 'string', enum: ['none', 'low', 'medium', 'high', 'xhigh', 'max'], description: 'Optional reasoning effort override. Omit to use KernelAgent settings.' },
+      verify: { type: 'boolean', description: 'Optional verification override. Omit to use KernelAgent settings.' },
+      enable_experience_memory: { type: 'boolean', description: 'Optional experience-memory override. Omit to use KernelAgent settings.' },
+      strategy: { type: 'string', enum: ['beam_search', 'greedy'], description: 'Optional optimization strategy override. Omit to use KernelAgent settings.' },
     },
     output: {
       schema: {
@@ -89,66 +85,38 @@ The web UI will automatically render this as an interactive bar chart comparing 
           report: { type: 'string', description: 'Pre-built markdown report for run_example mode.' },
           perfchart_json: { type: 'string', description: 'JSON string for perfchart Canvas rendering. If present, output a fenced code block with language "perfchart" containing this exact string.' },
           _mergedConfig: { type: 'string', description: 'JSON string of merged global + per-call config for traceability.' },
-          kernel_code: { type: 'string' },
+          kernel_code: {
+            oneOf: [
+              { type: 'string' },
+              { type: 'object', additionalProperties: true, properties: {} },
+            ],
+          },
           kernel_path: { type: 'string' },
           session_dir: { type: 'string' },
           artifacts_dir: { type: 'string' },
           initial_time_ms: { type: 'number' },
+          verification_status: { type: 'string' },
+          pytorch_baseline_ms: { type: 'number' },
           best_time_ms: { type: 'number' },
           improvement_pct: { type: 'number' },
           message: { type: 'string' },
         },
       },
-      render: (_args, value: any) => {
-        // Format merged config for display at the very top of the tool output
-        let mergedConfigDisplay = ''
-        if (value._mergedConfig) {
-          let cfgObj: any = value._mergedConfig
-          if (typeof cfgObj === 'string') cfgObj = JSON.parse(cfgObj)
-          const kv = Object.entries(cfgObj as Record<string, any>)
-            .map(([k, v]) => `${k}: ${v}`)
-            .join(' | ')
-          mergedConfigDisplay = `━━━ KernelAgent Execution Config ━━━\n${kv}\n\n`
-        }
-
-        if (value.mode === 'run_example' && typeof value.report === 'string') {
-          const blocks: any[] = [
-            { type: 'text', text: mergedConfigDisplay + value.report },
-          ]
-          // ALWAYS append perfchart block for run_example mode (demo data for now)
-          const chartJson = value.perfchart_json ?? JSON.stringify({
-            title: 'Kernel Performance',
-            unit: 'ms',
-            data: [
-              { label: 'PyTorch', value: 0.00822, color: '#5470c6' },
-              { label: 'Initial', value: 0.00679, color: '#91cc75' },
-              { label: 'Best', value: 0.00543, color: '#fac858' },
-            ],
-            improvement_pct: 20.0,
-            is_mock: true,
-            note: 'Demo data.',
-          }, null, 2)
-          blocks.push({ type: 'text', text: '\n\n━━━ Performance Chart (Demo Data) ━━━\n' })
-          blocks.push({ type: 'text', text: '```perfchart\n' + chartJson + '\n```' })
-
-          // Append merged config JSON for traceability (visible in Trajectory Output tab)
-          if (value._mergedConfig) {
-            let cfgObj: any = value._mergedConfig
-            if (typeof cfgObj === 'string') cfgObj = JSON.parse(cfgObj)
-            const cfgText = JSON.stringify(cfgObj, null, 2)
-            blocks.push({ type: 'text', text: '\n\n<!-- tool-config -->\n```json\n"merged_config": ' + cfgText + '\n```\n' })
-          }
-
-          return blocks
-        }
+      render: (args, value: any) => {
         const lines: string[] = []
-        lines.push(mergedConfigDisplay)
         lines.push(`KernelAgent ${value.success ? '✅ succeeded' : '❌ failed'}`)
+        if (value.verification_status) lines.push(`Correctness verification: ${value.verification_status}`)
+        if (value.rounds != null) lines.push(`Generation rounds: ${value.rounds}`)
         if (value.kernel_path) lines.push(`Kernel: ${value.kernel_path}`)
         if (value.session_dir) lines.push(`Session: ${value.session_dir}`)
         if (value.artifacts_dir) lines.push(`Artifacts: ${value.artifacts_dir}`)
-        if (value.initial_time_ms != null && value.best_time_ms != null) {
+        if (args.mode === 'optimize' && Number.isFinite(value.initial_time_ms) && value.initial_time_ms > 0
+          && Number.isFinite(value.best_time_ms) && value.best_time_ms > 0) {
           lines.push(`Perf: ${value.initial_time_ms.toFixed(3)}ms → ${value.best_time_ms.toFixed(3)}ms`)
+          lines.push(`Speedup vs initial kernel: ${(value.initial_time_ms / value.best_time_ms).toFixed(3)}x (below 1 means slower)`)
+          if (Number.isFinite(value.pytorch_baseline_ms) && value.pytorch_baseline_ms > 0) {
+            lines.push(`PyTorch baseline: ${value.pytorch_baseline_ms}ms; speedup vs PyTorch: ${(value.pytorch_baseline_ms / value.best_time_ms).toFixed(3)}x`)
+          }
           if (value.improvement_pct != null) lines.push(`Improvement: ${value.improvement_pct.toFixed(1)}%`)
         }
         if (value.message) lines.push(`Message: ${value.message}`)
@@ -156,38 +124,37 @@ The web UI will automatically render this as an interactive bar chart comparing 
 
         return [{ type: 'text', text: lines.join('\n') }]
       },
+      presentationMeta: (args, value: any) => {
+        const sourceFiles = value.files ?? value.kernel_code
+        const files = typeof sourceFiles === 'object' && sourceFiles !== null
+          ? Object.entries(sourceFiles).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+          : typeof sourceFiles === 'string' && sourceFiles !== ''
+            ? [[typeof value.kernel_path === 'string' ? value.kernel_path.split(/[\\/]/).pop() || 'kernel.py' : 'kernel.py', sourceFiles]]
+            : []
+        const timings = [
+          { label: 'PyTorch', value: value.pytorch_baseline_ms },
+          { label: 'Initial', value: value.initial_time_ms },
+          { label: 'Best', value: value.best_time_ms },
+        ].filter(item => typeof item.value === 'number' && Number.isFinite(item.value) && item.value > 0)
+        const chart = args.mode === 'optimize' && timings.length >= 2
+          ? JSON.stringify({ title: 'Kernel Performance', unit: 'ms', data: timings })
+          : args.mode === 'run_example' && typeof value.perfchart_json === 'string' ? value.perfchart_json : undefined
+        return {
+          ...(chart === undefined ? {} : { kernelagentChart: chart }),
+          kernelagentFiles: files.map(([fileName, source]) => ({ fileName, source })),
+          ...(files.length === 0 && typeof value.report === 'string' ? { kernelagentReport: value.report } : {}),
+        }
+      },
     },
     async execute(args, exec) {
+      const globalConfig = ctx.settings.get(CONFIG_TOOL_SETTINGS_NAMESPACE) as Config | undefined
+      if (!globalConfig) throw new Error('KernelAgent settings are not registered')
+      const mergedConfig = mergeKernelAgentConfig(args, globalConfig)
+      const apiKey = await resolveApiKey(ctx, globalConfig)
+
       const tmpDir = mkdtempSync(join(tmpdir(), 'ka-'))
       const inputPath = join(tmpDir, 'input.json')
       const outputPath = join(tmpDir, 'output.json')
-
-      // 读取 Web 配置卡片中的全局配置（由 kernelagent-config-tool 写入）
-      let globalConfig: any = {}
-      try {
-        if (existsSync(KERNELAGENT_CONFIG_FILE)) {
-          globalConfig = JSON.parse(readFileSync(KERNELAGENT_CONFIG_FILE, 'utf-8'))
-          console.log('[kernelagent-tool] loaded global config from', KERNELAGENT_CONFIG_FILE)
-        }
-      } catch (e: any) {
-        console.warn('[kernelagent-tool] failed to read global config:', e.message)
-      }
-
-      // Build merged config with priority: args > globalConfig > defaults
-      // SECURITY: apiKey is resolved from environment variables, never from disk.
-      const mergedConfig = {
-        model: args.model ?? globalConfig.modelName ?? 'deepseek-chat',
-        workers: args.workers ?? globalConfig.workers ?? 4,
-        max_rounds: args.max_rounds ?? globalConfig.maxRounds ?? 8,
-        verify: args.verify ?? globalConfig.verify ?? true,
-        platform: args.platform ?? globalConfig.platform ?? 'musa',
-        kernel_backend: args.kernel_backend ?? globalConfig.kernelBackend ?? 'triton',
-        enable_experience_memory: args.enable_experience_memory ?? globalConfig.enable_experience_memory ?? true,
-        strategy: args.strategy ?? globalConfig.strategy ?? 'beam_search',
-        apiKey: resolveApiKey(),
-        baseURL: globalConfig.baseURL ?? 'https://api.deepseek.com/v1/chat/completions',
-        iterations: globalConfig.iterations ?? 1,
-      }
 
       // Print merged config for operational traceability / debugging
       console.log('[kernelagent-tool] ▶ merged config:', JSON.stringify(mergedConfig))
@@ -198,6 +165,7 @@ The web UI will automatically render this as an interactive bar chart comparing 
         test_code: args.test_code,
         options: {
           mode: args.mode,
+          apiKey,
           ...mergedConfig,
         },
       }

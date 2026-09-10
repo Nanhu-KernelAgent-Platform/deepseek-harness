@@ -2,7 +2,7 @@
 
 import type { SettingsScope, SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import {
-  CardForm, numberField, textField,
+  booleanField, CardForm, numberField, textField,
   type CardActions, type CardFieldState, type CardShell,
 } from './card-form.ts'
 
@@ -15,12 +15,14 @@ export interface ConfigToolSettings {
   apiKey?: string
   modelName?: string
   baseURL?: string
-  iterations?: number
   workers?: number
   maxRounds?: number
   platform?: string
   kernelBackend?: string
   strategy?: string
+  reasoningEffort?: string
+  verify?: boolean
+  enableExperienceMemory?: boolean
 }
 
 /** What the config-tool card renders. */
@@ -28,12 +30,14 @@ export interface ConfigToolCardState extends CardShell {
   apiKey: CardFieldState
   modelName: CardFieldState
   baseURL: CardFieldState
-  iterations: CardFieldState
   workers: CardFieldState
   maxRounds: CardFieldState
   platform: CardFieldState
   kernelBackend: CardFieldState
   strategy: CardFieldState
+  reasoningEffort: CardFieldState
+  verify: CardFieldState
+  enableExperienceMemory: CardFieldState
 }
 
 /** The registration-side face the config-tool card's slot entry injects. */
@@ -54,12 +58,14 @@ export class ConfigToolCardController {
       textField('apiKey'),
       textField('modelName'),
       textField('baseURL'),
-      numberField('iterations'),
       numberField('workers'),
       numberField('maxRounds'),
       textField('platform'),
       textField('kernelBackend'),
       textField('strategy'),
+      textField('reasoningEffort'),
+      booleanField('verify'),
+      booleanField('enableExperienceMemory'),
     ])
     this.store = this.form.bind(() => this.projection())
   }
@@ -70,15 +76,21 @@ export class ConfigToolCardController {
       apiKey: this.form.field('apiKey'),
       modelName: this.form.field('modelName'),
       baseURL: this.form.field('baseURL'),
-      iterations: this.form.field('iterations'),
       workers: this.form.field('workers'),
       maxRounds: this.form.field('maxRounds'),
       platform: this.form.field('platform'),
       kernelBackend: this.form.field('kernelBackend'),
       strategy: this.form.field('strategy'),
+      reasoningEffort: this.form.field('reasoningEffort'),
+      verify: this.form.field('verify'),
+      enableExperienceMemory: this.form.field('enableExperienceMemory'),
     }
   }
 
+  /**
+   * Expose the configuration card state and actions.
+   * @returns The injection data consumed by the settings card.
+   */
   inject(): ConfigToolCardFace {
     return { hooks: { configToolCard: this.store }, ...this.form.actions() }
   }

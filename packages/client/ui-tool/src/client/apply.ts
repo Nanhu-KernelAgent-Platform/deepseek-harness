@@ -11,6 +11,7 @@ import { fileMutationToolview } from './tool/toolviews/file-mutation-row.tsx'
 import { readToolview } from './tool/toolviews/read-row.tsx'
 import { searchToolview } from './tool/toolviews/search-row.tsx'
 import { todoToolview } from './tool/toolviews/todo-row.tsx'
+import { kernelAgentToolview } from './tool/toolviews/kernelagent-row.tsx'
 import { webToolview } from './tool/toolviews/web-row.tsx'
 
 /** Required services: the slot registry and the Host description used for POSIX `~`. */
@@ -46,4 +47,5 @@ export function apply(ctx: ClientContext): void {
   ctx.plugin(webToolview)
   ctx.plugin(todoToolview)
   ctx.plugin(askQuestionToolview)
+  ctx.plugin(kernelAgentToolview)
 }
