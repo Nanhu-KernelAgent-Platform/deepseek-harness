@@ -5,6 +5,7 @@ import { writeFileSync, readFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CONFIG_TOOL_SETTINGS_NAMESPACE, resolveApiKey, type Config } from './kernelagent-config-tool.ts'
+import { peekPreparedPrompt, requiresPreparedPrompt, takePreparedPrompt } from './kernelagent-prompt-store.ts'
 
 // ========== Runtime configuration via environment variables ==========
 // These are injected by start_dsh.sh or the host environment.
@@ -51,18 +52,38 @@ export function apply(ctx: Context) {
     order: 210,
     text: `Use the kernelagent tool to generate, fuse, optimize GPU Triton kernels, or run a predefined example.
 Modes: generate | fuse | optimize | run_example.
+For generate, fuse, or optimize: call kernelagent_describe first; those modes refuse to run without its prepared prompt, and problem_code is taken from that prompt (do not invent one).
 Call the tool immediately without an announcement or progress preamble. After a successful call, always provide a short final answer in the user's language (2-4 sentences): summarize the requested operator and target platform, report the actual generation and correctness-verification outcome, and mention that the source files can be downloaded from the KernelAgent card above. Include optimization rounds or performance measurements only when returned by the tool. Tool success alone is not evidence that correctness verification passed or performance improved; if verification details are absent, say they were not reported. When no optimize call was performed, summarize correctness only and do not mention missing benchmarks or performance. After optimize, include the returned optimization timings and speedup, clearly distinguishing the initial-kernel baseline from the PyTorch baseline. Do not run additional benchmarks for the summary. On failure, briefly explain the returned error and any actionable next step supported by it.
 KernelAgent settings are authoritative. Do not override model, workers, rounds, platform, backend, strategy, reasoning effort, verification, or experience memory when settings are available.
 The KernelAgent tool card displays available generated source files and per-file download buttons. Do not reproduce the report or source code in your reply. The card opens itself; do not tell the user to expand it. The final answer must contain a useful result summary, not just internal reasoning or a statement that the tool succeeded.`,
   })
 
+  // Fail closed when generate/fuse/optimize run without a describe-prepared prompt.
+  ctx.on('tools/pre-execute', async (exec, next) => {
+    if (exec.name !== 'kernelagent') return next()
+    const mode = (exec.arguments as { mode?: unknown } | undefined)?.mode
+    if (!requiresPreparedPrompt(mode)) return next()
+    const agent = exec.agent
+    if (!agent) {
+      return { kind: 'deny' as const, reason: 'kernelagent generate/fuse/optimize requires a live agent with a prepared describe prompt' }
+    }
+    const prepared = peekPreparedPrompt(String(agent.session.id))
+    if (!prepared) {
+      return {
+        kind: 'deny' as const,
+        reason: 'Call kernelagent_describe first so Describe1+Describe2 are prepared for this session',
+      }
+    }
+    return next()
+  })
+
   const toolDef = defineTool({
     name: 'kernelagent',
-    description: 'Generate, fuse, optimize GPU Triton kernels, or run a predefined example using KernelAgent (from-git).',
+    description: 'Generate, fuse, optimize GPU Triton kernels, or run a predefined example using KernelAgent (from-git). generate/fuse/optimize require a prior kernelagent_describe call.',
     parameters: {
       mode: { type: 'string', required: true, enum: ['generate', 'fuse', 'optimize', 'run_example'], description: 'Mode: generate, fuse, optimize, or run_example.' },
       example_name: { type: 'string', description: 'Example directory name for run_example mode (e.g. optimize_04_musa_sigmoid).' },
-      problem_code: { type: 'string', description: 'PyTorch code or description. Required for generate/fuse/optimize.' },
+      problem_code: { type: 'string', description: 'Ignored for generate/fuse/optimize: the prepared describe prompt is used. Optional for run_example.' },
       initial_kernel: { type: 'string', description: 'Required for optimize mode.' },
       test_code: { type: 'string', description: 'Optional test harness code.' },
       model: { type: 'string', description: 'Optional per-call model override. Omit to use KernelAgent settings.' },
@@ -152,6 +173,22 @@ The KernelAgent tool card displays available generated source files and per-file
       const mergedConfig = mergeKernelAgentConfig(args, globalConfig)
       const apiKey = await resolveApiKey(ctx, globalConfig)
 
+      let problemCode = args.problem_code || ''
+      if (requiresPreparedPrompt(args.mode)) {
+        const agent = exec.agent
+        if (!agent) throw new Error('kernelagent generate/fuse/optimize requires a live agent')
+        const prepared = takePreparedPrompt(String(agent.session.id))
+        if (!prepared) {
+          throw new Error('Missing prepared describe prompt; call kernelagent_describe first')
+        }
+        problemCode = prepared.prompt
+        console.log('[kernelagent-tool] ▶ using describe prompt:', {
+          describe1Chars: prepared.describe1.length,
+          describe2Chars: prepared.describe2.length,
+          promptChars: prepared.prompt.length,
+        })
+      }
+
       const tmpDir = mkdtempSync(join(tmpdir(), 'ka-'))
       const inputPath = join(tmpDir, 'input.json')
       const outputPath = join(tmpDir, 'output.json')
@@ -160,7 +197,7 @@ The KernelAgent tool card displays available generated source files and per-file
       console.log('[kernelagent-tool] ▶ merged config:', JSON.stringify(mergedConfig))
 
       const payload: any = {
-        problem_code: args.problem_code || '',
+        problem_code: problemCode,
         initial_kernel: args.initial_kernel,
         test_code: args.test_code,
         options: {
