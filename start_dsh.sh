@@ -10,9 +10,20 @@ cd "${HARNESS_DIR}"
 export KERNELAGENT_PYTHON="${KERNELAGENT_PYTHON:-python3}"
 export KERNELAGENT_BRIDGE="${KERNELAGENT_BRIDGE:-${HARNESS_DIR}/scratch-plugin/kernelagent_bridge.py}"
 export KERNELAGENT_WORKING_DIR="${KERNELAGENT_WORKING_DIR:-${HARNESS_DIR}/../KernelAgent-from-git}"
+# KernelAgent-injector (third plugin, batch-1 MVP): deploy best_bundle into a
+# managed runtime store and register torch.ops.kernelagent::<op>.
+export KERNELAGENT_INJECTOR_BRIDGE="${KERNELAGENT_INJECTOR_BRIDGE:-${HARNESS_DIR}/scratch-plugin/kernelagent_injector_bridge.py}"
+export KERNELAGENT_RUNTIME_STORE="${KERNELAGENT_RUNTIME_STORE:-${KERNELAGENT_WORKING_DIR}/runtime_store}"
+# Directory that holds the training/test scripts 
+export KERNELAGENT_TRAIN_DIR="${KERNELAGENT_TRAIN_DIR:-${HARNESS_DIR}/../train}"
 
 if [[ ! -f "${KERNELAGENT_BRIDGE}" ]]; then
   echo "KernelAgent bridge not found: ${KERNELAGENT_BRIDGE}" >&2
+  exit 1
+fi
+
+if [[ ! -d "${KERNELAGENT_WORKING_DIR}" ]]; then
+  echo "KernelAgent checkout not found: ${KERNELAGENT_WORKING_DIR}" >&2
   exit 1
 fi
 

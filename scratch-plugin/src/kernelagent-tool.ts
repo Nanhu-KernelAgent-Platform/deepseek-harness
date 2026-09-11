@@ -1,7 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import { spawn } from 'node:child_process'
-import { writeFileSync, readFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { writeFileSync, readFileSync, mkdtempSync, rmSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CONFIG_TOOL_SETTINGS_NAMESPACE, resolveApiKey, type Config } from './kernelagent-config-tool.ts'
@@ -17,6 +17,25 @@ function requiredEnvironment(name: string): string {
 }
 const BRIDGE = requiredEnvironment('KERNELAGENT_BRIDGE')
 const CWD = requiredEnvironment('KERNELAGENT_WORKING_DIR')
+
+function scanExamples(cwd: string): string[] {
+  const examplesDir = join(cwd, 'examples')
+  const names: string[] = []
+  try {
+    for (const entry of readdirSync(examplesDir)) {
+      const full = join(examplesDir, entry)
+      try {
+        if (statSync(full).isDirectory()) {
+          // Only count directories that contain a run.sh (runnable example)
+          const runSh = join(full, 'run.sh')
+          statSync(runSh)
+          names.push(entry)
+        }
+      } catch { /* not a runnable example */ }
+    }
+  } catch { /* examples dir missing */ }
+  return names.sort()
+}
 
 function nonEmptyString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
@@ -49,11 +68,18 @@ export const name = 'kernelagent-tool'
 export const inject = ['tools', 'systemPrompt', 'settings']
 
 export function apply(ctx: Context) {
+  const exampleNames = scanExamples(CWD)
+  const exampleList = exampleNames.length
+    ? `Available run_example names: ${exampleNames.join(', ')}.`
+    : 'No runnable examples discovered in the examples/ directory.'
+
   ctx.systemPrompt.section({
     name: 'tool:kernelagent',
     order: 210,
     text: `Use the kernelagent tool to generate, fuse, optimize GPU Triton kernels, or run a predefined example.
 Modes: generate | fuse | optimize | run_example. In generate mode, the saved autoOptimize setting automatically runs performance optimization after correctness verification; do not issue a second optimize call for that workflow. Report optimization_status and optimization_error when returned.
+${exampleList}
+When the user asks to run an example, map their natural-language description to the closest example name above and call run_example with that exact example_name. If the user names an example that is not in the list, report the available examples and ask them to pick one.
 For generate, fuse, or optimize: call kernelagent_describe first; those modes refuse to run without its prepared prompt, and problem_code is taken from that prompt (do not invent one). After a successful forward run, if the user also asked for a reverse/backward operator, call kernelagent_describe again with kind=backward, then call kernelagent again.
 Call the tool immediately without an announcement or progress preamble. After a successful call, always provide a short final answer in the user's language (2-4 sentences): summarize the requested operator and target platform, report the actual generation and correctness-verification outcome, and mention that the source files can be downloaded from the KernelAgent card above. Include optimization rounds, performance measurements, or MCU bottleneck and SOL utilization only when returned by the tool. Tool success alone is not evidence that correctness verification passed or performance improved; if verification details are absent, say they were not reported. When no optimization was performed (including automatic optimization), summarize correctness only and do not mention missing benchmarks or performance. After explicit or automatic optimization, include the returned optimization timings and speedup, clearly distinguishing the initial-kernel baseline from the PyTorch baseline. Do not run additional benchmarks for the summary. On failure, briefly explain the returned error and any actionable next step supported by it.
 KernelAgent settings are authoritative. Do not override model, workers, rounds, platform, backend, strategy, reasoning effort, verification, or experience memory when settings are available.
@@ -84,7 +110,7 @@ The KernelAgent tool card displays available generated source files and per-file
     description: 'Generate, fuse, optimize GPU Triton kernels, or run a predefined example using KernelAgent (from-git). generate/fuse/optimize require a prior kernelagent_describe call.',
     parameters: {
       mode: { type: 'string', required: true, enum: ['generate', 'fuse', 'optimize', 'run_example'], description: 'Mode: generate, fuse, optimize, or run_example.' },
-      example_name: { type: 'string', description: 'Example directory name for run_example mode (e.g. optimize_04_musa_sigmoid).' },
+      example_name: { type: 'string', description: `Example directory name for run_example mode. ${exampleList}` },
       problem_code: { type: 'string', description: 'Ignored for generate/fuse/optimize: the prepared describe prompt is used. Optional for run_example.' },
       initial_kernel: { type: 'string', description: 'Required for optimize mode.' },
       test_code: { type: 'string', description: 'Optional test harness code.' },

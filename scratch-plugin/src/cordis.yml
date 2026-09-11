@@ -8,3 +8,5 @@
       name: './kernelagent-tool.ts'
     - id: kernelagent-config-tool
       name: './kernelagent-config-tool.ts'
+    - id: kernelagent-injector-tool
+      name: './kernelagent-injector-tool.ts'

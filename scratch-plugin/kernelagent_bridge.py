@@ -312,20 +312,87 @@ def run_optimize(payload: dict) -> dict:
         return {"success": False, "error": str(e)}
 
 
+# --------------------------------------------------------------------------- #
+# Example discovery helpers (generic)
+# --------------------------------------------------------------------------- #
+
+def list_examples(base_dir: Path | None = None) -> list[dict]:
+    """Scan examples/ and return metadata for every runnable example."""
+    root = (base_dir or PROJECT_ROOT) / "examples"
+    if not root.is_dir():
+        return []
+    examples: list[dict] = []
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+        run_script = child / "run.sh"
+        problem_py = child / "problem.py"
+        if not run_script.is_file():
+            continue
+        # Discover latest fallback result (if any)
+        results_dir = child / "results"
+        latest_run: str | None = None
+        if results_dir.is_dir():
+            runs = sorted(
+                d.name for d in results_dir.iterdir()
+                if d.is_dir() and d.name.startswith("run_")
+            )
+            if runs:
+                latest_run = runs[-1]
+        examples.append({
+            "name": child.name,
+            "has_problem_py": problem_py.is_file(),
+            "has_run_sh": True,
+            "latest_fallback_run": latest_run,
+        })
+    return examples
+
+
+def discover_fallback(example_dir: Path) -> Path | None:
+    """Return the latest run_* directory under example_dir/results, or None."""
+    results_dir = example_dir / "results"
+    if not results_dir.is_dir():
+        return None
+    runs = sorted(d for d in results_dir.iterdir()
+                  if d.is_dir() and d.name.startswith("run_"))
+    return runs[-1] if runs else None
+
+
 def run_example(payload: dict) -> dict:
     """Run a specific example and always load the historical fallback result."""
     import subprocess
     import os
 
-    example_name = payload.get("example_name", "optimize_04_musa_sigmoid")
-    fallback_result_name = payload.get("fallback_result", "run_20260811_135707_1947166")
+    example_name = payload.get("example_name", "")
+    if not example_name:
+        available = list_examples()
+        names = [e["name"] for e in available]
+        return {
+            "success": False,
+            "mode": "run_example",
+            "error": f"example_name is required. Available examples: {names}",
+            "available_examples": available,
+        }
 
     # ===== Read global options from payload (merged by kernelagent-tool.ts) =====
     options = payload.get("options", {})
 
     base_dir = PROJECT_ROOT
     example_dir = base_dir / "examples" / example_name
-    fallback_result_dir = example_dir / "results" / fallback_result_name
+
+    if not example_dir.is_dir():
+        available = list_examples()
+        names = [e["name"] for e in available]
+        return {
+            "success": False,
+            "mode": "run_example",
+            "error": f"example '{example_name}' not found. Available examples: {names}",
+            "available_examples": available,
+        }
+
+    # Dynamic fallback discovery: pick the latest run_* directory
+    fallback_run_dir = discover_fallback(example_dir)
+    fallback_result_dir = fallback_run_dir if fallback_run_dir else example_dir / "results" / "run_unknown"
 
     run_script = example_dir / "run.sh"
     actual_exit_code = None
@@ -570,10 +637,12 @@ def main():
         # For run_example mode, always try to return fallback results even on total failure
         if args.mode == "run_example":
             try:
-                # Try to recover with a minimal payload
-                fallback_payload = {"example_name": "optimize_04_musa_sigmoid"}
+                # Try to recover with a minimal payload (use first available example)
+                available = list_examples()
+                first_example = available[0]["name"] if available else ""
+                fallback_payload: dict = {"example_name": first_example}
                 if 'payload' in dir() and isinstance(payload, dict):
-                    fallback_payload["example_name"] = payload.get("example_name", "optimize_04_musa_sigmoid")
+                    fallback_payload["example_name"] = payload.get("example_name") or first_example
                 result = run_example(fallback_payload)
                 result["bridge_caught_error"] = str(e)
             except Exception as inner_e:
