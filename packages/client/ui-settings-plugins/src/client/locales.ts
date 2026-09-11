@@ -16,6 +16,8 @@ export type PluginsSettingsLocaleKey =
   | 'configToolModelName' | 'configToolModelNameHint'
   | 'configToolBaseUrl' | 'configToolBaseUrlHint'
   | 'configToolWorkers' | 'configToolWorkersHint'
+  | 'configToolAutoOptimize' | 'configToolAutoOptimizeHint'
+  | 'configToolGenerationMaxRounds' | 'configToolGenerationMaxRoundsHint'
   | 'configToolMaxRounds' | 'configToolMaxRoundsHint'
   | 'configToolPlatform' | 'configToolPlatformHint'
   | 'configToolKernelBackend' | 'configToolKernelBackendHint'
@@ -74,7 +76,11 @@ export const en: Record<PluginsSettingsLocaleKey, string> = {
   configToolBaseUrlHint: 'OpenAI-compatible chat-completions URL.',
   configToolWorkers: 'Workers',
   configToolWorkersHint: 'Parallel optimization threads (1–16).',
-  configToolMaxRounds: 'Max rounds',
+  configToolAutoOptimize: 'Optimize after generation',
+  configToolAutoOptimizeHint: 'Automatically optimize a verified generated kernel. Retain it if optimization fails.',
+  configToolGenerationMaxRounds: 'Generation refinement rounds',
+  configToolGenerationMaxRoundsHint: 'Maximum rounds to repair generation or correctness failures (1–50).',
+  configToolMaxRounds: 'Optimization rounds',
   configToolMaxRoundsHint: 'Maximum optimization iterations (1–50).',
   configToolPlatform: 'Platform',
   configToolPlatformHint: 'Target GPU platform: cuda / musa / xpu.',
@@ -140,7 +146,11 @@ export const zh: Record<PluginsSettingsLocaleKey, string> = {
   configToolBaseUrlHint: 'OpenAI 兼容的 chat-completions 接口 URL。',
   configToolWorkers: '工作线程数',
   configToolWorkersHint: '并行优化的工作线程数（1–16）。',
-  configToolMaxRounds: '最大轮数',
+  configToolAutoOptimize: '生成后自动优化',
+  configToolAutoOptimizeHint: '生成并通过正确性验证后自动优化；优化失败时保留已验证的生成结果。',
+  configToolGenerationMaxRounds: '生成纠错轮数',
+  configToolGenerationMaxRoundsHint: '生成或正确性验证失败时，最多修正多少轮（1–50）。',
+  configToolMaxRounds: '性能优化轮数',
   configToolMaxRoundsHint: '最多执行多少轮优化迭代（1–50）。',
   configToolPlatform: '目标平台',
   configToolPlatformHint: '目标 GPU 平台：cuda / musa / xpu。',

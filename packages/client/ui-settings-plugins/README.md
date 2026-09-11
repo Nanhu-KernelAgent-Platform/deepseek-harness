@@ -10,6 +10,8 @@ The configurable tab reads which settings namespaces the Host serves and dispatc
 
 The cards this package ships cover the shell executor (`bash`), the agent loop's tool-call parallelism (`agent-loop`), and the DeepSeek search provider (`web-search-deepseek`).
 
+The KernelAgent card (`config-tool`) exposes **Optimize after generation** (`autoOptimize`, default `false`). Enabling it runs performance optimization after generation passes correctness verification. **Generation refinement rounds** (`generationMaxRounds`, default `8`) and **Optimization rounds** (`maxRounds`, default `8`) are independent. Optimization failure preserves the verified generated source and reports the optimization error; successful optimization displays measured timings and speedup. Save the card before starting a new generation request.
+
 ## Extension point
 
 The section declares `settings.plugins.tab`, a root list slot whose labels become ordered tabs. It keeps a tab mounted after its first selection, so local drafts and read-only snapshots survive tab switches. The package registers its own `configurable` contribution, which declares the nested `settings.plugin.item` slot — keyed on the settings namespace a card edits. A plugin that ships a browser half registers its own card under its own namespace and owns every part of it: chrome, controls, and copy. Keying on the namespace is what lets a plugin distributed outside this repository appear here — it registers the namespace on the Host and the card in the browser, and the tab pairs the two without learning what the namespace means. Tabs follow the contribution's `order`; cards follow registration order.

@@ -29,6 +29,8 @@ export function mergeKernelAgentConfig(args: any, globalConfig: any) {
   return {
     model: nonEmptyString(globalConfig.modelName) ?? nonEmptyString(args.model) ?? 'deepseek-chat',
     workers: globalConfig.workers ?? args.workers ?? 4,
+    auto_optimize: globalConfig.autoOptimize ?? false,
+    generation_max_rounds: globalConfig.generationMaxRounds ?? 8,
     max_rounds: globalConfig.maxRounds ?? args.max_rounds ?? 8,
     verify: globalConfig.verify ?? args.verify ?? true,
     platform: nonEmptyString(globalConfig.platform) ?? nonEmptyString(args.platform) ?? 'musa',
@@ -51,9 +53,9 @@ export function apply(ctx: Context) {
     name: 'tool:kernelagent',
     order: 210,
     text: `Use the kernelagent tool to generate, fuse, optimize GPU Triton kernels, or run a predefined example.
-Modes: generate | fuse | optimize | run_example.
+Modes: generate | fuse | optimize | run_example. In generate mode, the saved autoOptimize setting automatically runs performance optimization after correctness verification; do not issue a second optimize call for that workflow. Report optimization_status and optimization_error when returned.
 For generate, fuse, or optimize: call kernelagent_describe first; those modes refuse to run without its prepared prompt, and problem_code is taken from that prompt (do not invent one). After a successful forward run, if the user also asked for a reverse/backward operator, call kernelagent_describe again with kind=backward, then call kernelagent again.
-Call the tool immediately without an announcement or progress preamble. After a successful call, always provide a short final answer in the user's language (2-4 sentences): summarize the requested operator and target platform, report the actual generation and correctness-verification outcome, and mention that the source files can be downloaded from the KernelAgent card above. Include optimization rounds or performance measurements only when returned by the tool. Tool success alone is not evidence that correctness verification passed or performance improved; if verification details are absent, say they were not reported. When no optimize call was performed, summarize correctness only and do not mention missing benchmarks or performance. After optimize, include the returned optimization timings and speedup, clearly distinguishing the initial-kernel baseline from the PyTorch baseline. Do not run additional benchmarks for the summary. On failure, briefly explain the returned error and any actionable next step supported by it.
+Call the tool immediately without an announcement or progress preamble. After a successful call, always provide a short final answer in the user's language (2-4 sentences): summarize the requested operator and target platform, report the actual generation and correctness-verification outcome, and mention that the source files can be downloaded from the KernelAgent card above. Include optimization rounds, performance measurements, or MCU bottleneck and SOL utilization only when returned by the tool. Tool success alone is not evidence that correctness verification passed or performance improved; if verification details are absent, say they were not reported. When no optimization was performed (including automatic optimization), summarize correctness only and do not mention missing benchmarks or performance. After explicit or automatic optimization, include the returned optimization timings and speedup, clearly distinguishing the initial-kernel baseline from the PyTorch baseline. Do not run additional benchmarks for the summary. On failure, briefly explain the returned error and any actionable next step supported by it.
 KernelAgent settings are authoritative. Do not override model, workers, rounds, platform, backend, strategy, reasoning effort, verification, or experience memory when settings are available.
 The KernelAgent tool card displays available generated source files and per-file download buttons. Do not reproduce the report or source code in your reply. The card opens itself; do not tell the user to expand it. The final answer must contain a useful result summary, not just internal reasoning or a statement that the tool succeeded.`,
   })
@@ -120,6 +122,9 @@ The KernelAgent tool card displays available generated source files and per-file
           pytorch_baseline_ms: { type: 'number' },
           best_time_ms: { type: 'number' },
           improvement_pct: { type: 'number' },
+          bottleneck: { type: 'string' },
+          compute_sol_pct: { type: 'number' },
+          memory_sol_pct: { type: 'number' },
           message: { type: 'string' },
         },
       },
@@ -127,11 +132,14 @@ The KernelAgent tool card displays available generated source files and per-file
         const lines: string[] = []
         lines.push(`KernelAgent ${value.success ? '✅ succeeded' : '❌ failed'}`)
         if (value.verification_status) lines.push(`Correctness verification: ${value.verification_status}`)
+        if (value.optimization_status) lines.push(`Optimization: ${value.optimization_status}`)
+        if (value.optimization_error) lines.push(`Optimization error (verified generated kernel retained): ${value.optimization_error}`)
+        if (value.total_rounds != null) lines.push(`Optimization rounds: ${value.total_rounds}`)
         if (value.rounds != null) lines.push(`Generation rounds: ${value.rounds}`)
         if (value.kernel_path) lines.push(`Kernel: ${value.kernel_path}`)
         if (value.session_dir) lines.push(`Session: ${value.session_dir}`)
         if (value.artifacts_dir) lines.push(`Artifacts: ${value.artifacts_dir}`)
-        if (args.mode === 'optimize' && Number.isFinite(value.initial_time_ms) && value.initial_time_ms > 0
+        if ((args.mode === 'optimize' || value.optimization_status === 'completed') && Number.isFinite(value.initial_time_ms) && value.initial_time_ms > 0
           && Number.isFinite(value.best_time_ms) && value.best_time_ms > 0) {
           lines.push(`Perf: ${value.initial_time_ms.toFixed(3)}ms → ${value.best_time_ms.toFixed(3)}ms`)
           lines.push(`Speedup vs initial kernel: ${(value.initial_time_ms / value.best_time_ms).toFixed(3)}x (below 1 means slower)`)
@@ -139,6 +147,12 @@ The KernelAgent tool card displays available generated source files and per-file
             lines.push(`PyTorch baseline: ${value.pytorch_baseline_ms}ms; speedup vs PyTorch: ${(value.pytorch_baseline_ms / value.best_time_ms).toFixed(3)}x`)
           }
           if (value.improvement_pct != null) lines.push(`Improvement: ${value.improvement_pct.toFixed(1)}%`)
+        }
+        if (typeof value.bottleneck === 'string' && value.bottleneck !== '') {
+          lines.push(`MCU bottleneck: ${value.bottleneck}`)
+        }
+        if (Number.isFinite(value.compute_sol_pct) && Number.isFinite(value.memory_sol_pct)) {
+          lines.push(`MCU utilization: Compute SOL ${value.compute_sol_pct.toFixed(1)}%, Memory SOL ${value.memory_sol_pct.toFixed(1)}%`)
         }
         if (value.message) lines.push(`Message: ${value.message}`)
         if (value.error && !value.success) lines.push(`Error: ${value.error}`)
@@ -157,7 +171,7 @@ The KernelAgent tool card displays available generated source files and per-file
           { label: 'Initial', value: value.initial_time_ms },
           { label: 'Best', value: value.best_time_ms },
         ].filter(item => typeof item.value === 'number' && Number.isFinite(item.value) && item.value > 0)
-        const chart = args.mode === 'optimize' && timings.length >= 2
+        const chart = (args.mode === 'optimize' || value.optimization_status === 'completed') && timings.length >= 2
           ? JSON.stringify({ title: 'Kernel Performance', unit: 'ms', data: timings })
           : args.mode === 'run_example' && typeof value.perfchart_json === 'string' ? value.perfchart_json : undefined
         return {

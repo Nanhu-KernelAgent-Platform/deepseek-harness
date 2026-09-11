@@ -30,6 +30,13 @@ def normalize_base_url(url: str) -> str:
     return url.rstrip("/")
 
 
+def resolve_backend_timeout(options: dict, musa_default: int) -> tuple[str, int]:
+    """Resolve the kernel backend and its verification timeout."""
+    backend = str(options.get("kernel_backend") or "triton")
+    timeout = int(options.get("test_timeout_s") or (musa_default if backend == "musa" else 30))
+    return backend, timeout
+
+
 def _mask_key(key: str) -> str:
     if not key or len(key) <= 10:
         return "***"
@@ -97,15 +104,16 @@ def run_generate(payload: dict) -> dict:
     from triton_kernel_agent.platform_config import get_platform
 
     options = payload.get("options", {})
+    backend, test_timeout_s = resolve_backend_timeout(options, 600)
     agent = TritonKernelAgent(
         num_workers=options.get("workers", 4),
-        max_rounds=options.get("max_rounds", 8),
+        max_rounds=options.get("generation_max_rounds", options.get("max_rounds", 8)),
         model_name=options.get("model", "Deepseek-V4-Flash"),
         high_reasoning_effort=options.get("high_reasoning_effort", True),
         target_platform=get_platform(options.get("platform", "cuda")),
-        kernel_backend=options.get("kernel_backend", "triton"),
+        kernel_backend=backend,
         no_cusolver=options.get("no_cusolver", False),
-        test_timeout_s=options.get("test_timeout_s", 30),
+        test_timeout_s=test_timeout_s,
         enable_experience_memory=options.get("enable_experience_memory", True),
         experience_db_path=options.get("experience_db_path"),
     )
@@ -130,7 +138,45 @@ def run_generate(payload: dict) -> dict:
     payload_out.update(serialize_kernel_payload(result.get("kernel_code")))
     # generate_kernel returns success only after its verification worker passes.
     payload_out["verification_status"] = "passed" if result.get("success") else "failed"
-    return payload_out
+    if not options.get("auto_optimize", False):
+        return payload_out
+    if not payload_out["success"]:
+        return {**payload_out, "optimization_status": "skipped"}
+
+    try:
+        initial_kernel = result["kernel_code"]
+        if isinstance(initial_kernel, dict):
+            from triton_kernel_agent.kernel_backend import KernelBundle
+            initial_kernel = KernelBundle(initial_kernel).render_for_prompt()
+        elif hasattr(initial_kernel, "render_for_prompt"):
+            initial_kernel = initial_kernel.render_for_prompt()
+        tests = payload.get("test_code")
+        if result.get("session_dir"):
+            test_paths = sorted(Path(result["session_dir"]).glob("test_*.py"))
+            if test_paths:
+                tests = [path.read_text(encoding="utf-8") for path in test_paths]
+        if not tests:
+            raise ValueError("No generation verification tests available for optimization")
+        optimized = run_optimize({
+            **payload,
+            "initial_kernel": initial_kernel,
+            "test_code": tests,
+        })
+    except Exception as exc:
+        optimized = {"success": False, "error": str(exc)}
+    if not optimized.get("success") or not optimized.get("kernel_code"):
+        return {
+            **payload_out,
+            "optimization_status": "failed",
+            "optimization_error": optimized.get("error") or "Optimization returned no verified kernel",
+        }
+    # Paths and files from generation must never be advertised as the optimized output.
+    return {
+        **{key: value for key, value in payload_out.items()
+           if key not in ("kernel_code", "files", "kernel_path", "message")},
+        **optimized,
+        "optimization_status": "completed",
+    }
 
 
 def serialize_fusion_result(summary: dict, verify: bool) -> dict:
@@ -170,9 +216,8 @@ def run_fuse(payload: dict) -> dict:
     options = payload.get("options", {})
     problem_path = write_problem_file(payload["problem_code"])
     model = str(options.get("model") or "Deepseek-V4-Flash")
-    backend = str(options.get("kernel_backend") or "triton")
+    backend, test_timeout_s = resolve_backend_timeout(options, 180)
     max_iters = int(options.get("max_iters") or options.get("max_rounds") or 5)
-    test_timeout_s = int(options.get("test_timeout_s") or (180 if backend == "musa" else 30))
     try:
         summary = run_pipeline(
             problem_path=problem_path,
@@ -200,6 +245,7 @@ def run_optimize(payload: dict) -> dict:
     from triton_kernel_agent.opt_manager import OptimizationManager
 
     options = payload.get("options", {})
+    backend, test_timeout_s = resolve_backend_timeout(options, 600)
     problem_path = write_problem_file(payload.get("problem_code", ""))
     initial_kernel = payload.get("initial_kernel", "")
     if not initial_kernel:
@@ -221,7 +267,8 @@ def run_optimize(payload: dict) -> dict:
         enable_experience_memory=options.get("enable_experience_memory", True),
         experience_db_path=options.get("experience_db_path"),
         platform=options.get("platform", "nvidia"),
-        kernel_backend=options.get("kernel_backend", "triton"),
+        kernel_backend=backend,
+        test_timeout_s=test_timeout_s,
         strategy_config=options.get("strategy_config"),
     )
     try:
@@ -245,7 +292,21 @@ def run_optimize(payload: dict) -> dict:
                 else None
             ),
         }
-        payload_out.update(serialize_kernel_payload(result.get("kernel_code")))
+        if (
+            result.get("bottleneck")
+            and isinstance(result.get("compute_sol_pct"), (int, float))
+            and isinstance(result.get("memory_sol_pct"), (int, float))
+        ):
+            payload_out.update({
+                "bottleneck": result["bottleneck"],
+                "compute_sol_pct": result["compute_sol_pct"],
+                "memory_sol_pct": result["memory_sol_pct"],
+            })
+        kernel_code = result.get("kernel_code")
+        if options.get("kernel_backend") == "musa" and isinstance(kernel_code, str):
+            from triton_kernel_agent.kernel_backend import extract_kernel_bundle
+            kernel_code = extract_kernel_bundle(kernel_code) or kernel_code
+        payload_out.update(serialize_kernel_payload(kernel_code))
         return payload_out
     except Exception as e:
         return {"success": False, "error": str(e)}

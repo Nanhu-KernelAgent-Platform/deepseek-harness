@@ -17,6 +17,8 @@ export interface ConfigToolSettings {
   baseURL?: string
   workers?: number
   maxRounds?: number
+  generationMaxRounds?: number
+  autoOptimize?: boolean
   platform?: string
   kernelBackend?: string
   strategy?: string
@@ -32,6 +34,8 @@ export interface ConfigToolCardState extends CardShell {
   baseURL: CardFieldState
   workers: CardFieldState
   maxRounds: CardFieldState
+  generationMaxRounds: CardFieldState
+  autoOptimize: CardFieldState
   platform: CardFieldState
   kernelBackend: CardFieldState
   strategy: CardFieldState
@@ -60,6 +64,8 @@ export class ConfigToolCardController {
       textField('baseURL'),
       numberField('workers'),
       numberField('maxRounds'),
+      numberField('generationMaxRounds'),
+      booleanField('autoOptimize'),
       textField('platform'),
       textField('kernelBackend'),
       textField('strategy'),
@@ -78,6 +84,8 @@ export class ConfigToolCardController {
       baseURL: this.form.field('baseURL'),
       workers: this.form.field('workers'),
       maxRounds: this.form.field('maxRounds'),
+      generationMaxRounds: this.form.field('generationMaxRounds'),
+      autoOptimize: this.form.field('autoOptimize'),
       platform: this.form.field('platform'),
       kernelBackend: this.form.field('kernelBackend'),
       strategy: this.form.field('strategy'),

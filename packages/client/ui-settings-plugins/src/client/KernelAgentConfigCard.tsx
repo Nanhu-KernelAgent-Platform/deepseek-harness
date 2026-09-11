@@ -76,6 +76,30 @@ export function KernelAgentConfigCard(props: ConfigToolCardProps) {
         onReset={() => { props.resetField('workers') }}
       />
       <ValueField
+        id="plugin-config-config-tool-generation-max-rounds"
+        label={t('configToolGenerationMaxRounds')}
+        hint={t('configToolGenerationMaxRoundsHint')}
+        overriddenLabel={t('overridden')}
+        resetLabel={t('reset')}
+        invalidLabel={t('invalidNumber')}
+        numeric
+        disabled={disabled}
+        {...state.generationMaxRounds}
+        onEdit={(text) => { props.edit('generationMaxRounds', text) }}
+        onReset={() => { props.resetField('generationMaxRounds') }}
+      />
+      <BooleanField
+        id="plugin-config-config-tool-auto-optimize"
+        label={t('configToolAutoOptimize')}
+        hint={t('configToolAutoOptimizeHint')}
+        overriddenLabel={t('overridden')}
+        resetLabel={t('reset')}
+        disabled={disabled}
+        {...state.autoOptimize}
+        onEdit={(text) => { props.edit('autoOptimize', text) }}
+        onReset={() => { props.resetField('autoOptimize') }}
+      />
+      <ValueField
         id="plugin-config-config-tool-max-rounds"
         label={t('configToolMaxRounds')}
         hint={t('configToolMaxRoundsHint')}

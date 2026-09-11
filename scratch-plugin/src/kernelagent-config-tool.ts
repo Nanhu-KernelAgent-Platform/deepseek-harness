@@ -22,6 +22,8 @@ export interface Config {
   workers: number
   /** Maximum optimization rounds (1–50). */
   maxRounds: number
+  autoOptimize: boolean
+  generationMaxRounds: number
   /** Target GPU platform. */
   platform: 'cuda' | 'musa' | 'xpu'
   /** Kernel code-generation backend. */
@@ -43,6 +45,8 @@ export const ConfigSchema: Schema<Config> = Schema.object({
   modelName: Schema.string().pattern(/\S/).default('deepseek-chat').description('模型名称'),
   baseURL: Schema.string().pattern(/^https?:\/\//).default('https://api.deepseek.com/v1/chat/completions').description('API 地址'),
   workers: Schema.number().default(4).min(1).max(16).description('并行优化工作线程数'),
+  autoOptimize: Schema.boolean().default(false).description('生成后自动优化'),
+  generationMaxRounds: Schema.number().default(8).min(1).max(50).description('生成纠错轮数'),
   maxRounds: Schema.number().default(8).min(1).max(50).description('最大优化轮数'),
   platform: Schema.union(['cuda', 'musa', 'xpu']).default('musa').description('目标平台: cuda / musa / xpu'),
   kernelBackend: Schema.union(['triton', 'musa']).default('musa').description('Kernel 后端: triton / musa'),

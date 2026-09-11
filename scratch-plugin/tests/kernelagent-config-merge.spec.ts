@@ -42,6 +42,8 @@ describe('mergeKernelAgentConfig', () => {
       model: 'gpt-5.6-sol',
       workers: 1,
       max_rounds: 1,
+      auto_optimize: false,
+      generation_max_rounds: 8,
       verify: true,
       platform: 'musa',
       kernel_backend: 'musa',
@@ -50,6 +52,12 @@ describe('mergeKernelAgentConfig', () => {
       strategy: 'greedy',
       baseURL: 'https://zapi.deuo.top',
     })
+  })
+
+  it('takes automatic optimization and separate generation budget from saved settings', () => {
+    expect(mergeKernelAgentConfig({ auto_optimize: false }, {
+      autoOptimize: true, generationMaxRounds: 3, maxRounds: 7,
+    })).toMatchObject({ auto_optimize: true, generation_max_rounds: 3, max_rounds: 7 })
   })
 
   it('ignores blank model values and uses a safe fallback', () => {
@@ -61,7 +69,7 @@ describe('mergeKernelAgentConfig', () => {
 describe('KernelAgent result projection', () => {
   const definition = () => {
     let tool: any
-    apply({ systemPrompt: { section: () => {} }, tools: { register: (value: any) => { tool = value } } })
+    apply({ systemPrompt: { section: () => {} }, tools: { register: (value: any) => { tool = value } }, on: () => {} })
     return tool
   }
 
@@ -72,6 +80,19 @@ describe('KernelAgent result projection', () => {
       kernelagentFiles: [{ fileName: 'kernel.py', source: 'print("source")' }],
     })
     expect(JSON.stringify(tool.output.render({ mode: 'generate' }, value))).not.toContain('print("source")')
+  })
+
+  it('shows automatic optimization measurements and preserves failure diagnostics', () => {
+    const tool = definition()
+    const value = { success: true, optimization_status: 'completed', total_rounds: 3, initial_time_ms: 4, best_time_ms: 2 }
+    expect(tool.output.render({ mode: 'generate' }, value)[0].text).toContain('2.000x')
+    const profiled = { ...value, bottleneck: 'memory', compute_sol_pct: 33.3, memory_sol_pct: 81.3 }
+    expect(tool.output.render({ mode: 'generate' }, profiled)[0].text)
+      .toContain('MCU utilization: Compute SOL 33.3%, Memory SOL 81.3%')
+    expect(tool.output.presentationMeta({ mode: 'generate' }, value).kernelagentChart).toBeDefined()
+    expect(tool.output.render({ mode: 'generate' }, {
+      success: true, optimization_status: 'failed', optimization_error: 'GPU unavailable',
+    })[0].text).toContain('verified generated kernel retained')
   })
 
   it('only shows existing performance measurements for optimization', () => {
