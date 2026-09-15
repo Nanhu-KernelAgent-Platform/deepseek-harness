@@ -35,7 +35,76 @@ from typing import Any
 # Bundle file conventions (see triton_kernel_agent/kernel_backend.py BACKENDS).
 MUSA_FILES = ("kernel.py", "binding.cpp", "kernel.mu", "setup.py")
 TRITON_FILES = ("kernel.py",)
+# CUDA C++ extension bundle layout (prep for next-month CUDA adaptation).
+CUDA_FILES = ("kernel.py", "binding.cpp", "setup.py")
 BUILD_TIMEOUT_S = 600
+
+# Backends fully deployable this release; add "cuda" next month to enable it.
+DEPLOY_SUPPORTED_BACKENDS = ("musa", "triton")
+# C++ extension backends compiled via setup.py build_ext --inplace (cuda prep).
+BUILDABLE_BACKENDS = ("musa", "cuda")
+
+# --------------------------------------------------------------------------- #
+# C++ / PyTorch dtype & device mapping tables (for binding.cpp parsing)
+# --------------------------------------------------------------------------- #
+# at::ScalarType::Xxx  /  torch.floatXX  →  canonical dtype string
+_CPP_SCALAR_TYPE_TO_DTYPE: dict[str, str] = {
+    "Float": "float32",
+    "Double": "float64",
+    "Half": "float16",
+    "BFloat16": "bfloat16",
+    "Float8_e5m2": "float8_e5m2",
+    "Float8_e4m3fn": "float8_e4m3fn",
+    "Int": "int32",
+    "Long": "int64",
+    "Short": "int16",
+    "Char": "int8",
+    "Byte": "uint8",
+    "Bool": "bool",
+}
+# at::kXxx  (older macro style)  →  canonical dtype string
+_CPP_DTYPE_MACRO_TO_DTYPE: dict[str, str] = {
+    "kFloat": "float32",
+    "kDouble": "float64",
+    "kHalf": "float16",
+    "kBFloat16": "bfloat16",
+    "kInt": "int32",
+    "kLong": "int64",
+    "kShort": "int16",
+    "kChar": "int8",
+    "kByte": "uint8",
+    "kBool": "bool",
+}
+# c10::DeviceType::Xxx  /  tensor.is_xxx()  /  at::kXxx(device)  →  canonical device string
+_CPP_DEVICE_TYPE_TO_DEVICE: dict[str, str] = {
+    # c10::DeviceType enum names
+    "PrivateUse1": "musa",
+    "CUDA": "cuda",
+    "CPU": "cpu",
+    "XPU": "xpu",
+    "HIP": "hip",
+    # is_xxx() helper patterns
+    "is_musa": "musa",
+    "is_cuda": "cuda",
+    "is_xpu": "xpu",
+    "is_hip": "hip",
+    "is_cpu": "cpu",
+}
+# torch.floatXX string literal in TORCH_CHECK messages  →  canonical dtype string
+_TORCH_DTYPE_STR_TO_DTYPE: dict[str, str] = {
+    "torch.float32": "float32",
+    "torch.float64": "float64",
+    "torch.float16": "float16",
+    "torch.bfloat16": "bfloat16",
+    "torch.float8_e5m2": "float8_e5m2",
+    "torch.float8_e4m3fn": "float8_e4m3fn",
+    "torch.int32": "int32",
+    "torch.int64": "int64",
+    "torch.int16": "int16",
+    "torch.int8": "int8",
+    "torch.uint8": "uint8",
+    "torch.bool": "bool",
+}
 
 
 class BridgeError(Exception):
@@ -72,16 +141,53 @@ def sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
+# Maps a setup.py Extension class token to its canonical backend name.
+_EXT_CLASS_TO_BACKEND = {
+    "MUSAExtension": "musa",
+    "CUDAExtension": "cuda",
+    "CppExtension": "cpu",
+    "HIPExtension": "hip",
+}
+
+
+def _bundle_extension_backend(bundle_dir: Path) -> "str | None":
+    """Return backend from setup.py's *Extension class, else None."""
+    setup_py = bundle_dir / "setup.py"
+    if not setup_py.is_file():
+        return None
+    m = re.search(r"(MUSAExtension|CUDAExtension|CppExtension|HIPExtension)",
+                  setup_py.read_text(encoding="utf-8"))
+    return _EXT_CLASS_TO_BACKEND.get(m.group(1)) if m else None
+
+
 def detect_backend(bundle_dir: Path) -> str:
     names = {p.name for p in bundle_dir.iterdir() if p.is_file()}
+    # MUSA bundles carry a .mu file (triton-for-MUSA IR); this is the strongest
+    # and unambiguous signal.
     if all(f in names for f in MUSA_FILES):
         return "musa"
     if "kernel.py" in names:
+        # A C++ extension bundle (CUDA/MUSA/CPU/HIP) also ships kernel.py plus a
+        # setup.py referencing the matching *Extension class. Distinguish it
+        # from a pure-triton JIT bundle (which ships only kernel.py, or a
+        # setup.py without any *Extension class) by inspecting setup.py.
+        ext_backend = _bundle_extension_backend(bundle_dir)
+        if ext_backend is not None:
+            return ext_backend
         return "triton"
     raise BridgeError(
         f"best_bundle contents unrecognised or incomplete: {sorted(names)}; "
         f"musa requires {list(MUSA_FILES)}, triton requires {list(TRITON_FILES)}"
     )
+
+
+def _bundle_files_for(backend: str) -> tuple:
+    """File set to copy from a resolved bundle, keyed by backend."""
+    if backend == "musa":
+        return MUSA_FILES
+    if backend == "cuda":
+        return CUDA_FILES
+    return TRITON_FILES
 
 
 def _is_cuda_backend(bundle_dir: Path, meta: dict) -> bool:
@@ -189,7 +295,7 @@ def derive_op_from_problem(problem_py: Path, trace: TraceCollector | None = None
     """
     tc = trace or TraceCollector()
     text = problem_py.read_text(encoding="utf-8")
-    hits = {name for pat, name in PROBLEM_OP_PATTERNS if re.search(pat, text)}
+    hits = {name for pat, name in get_op_patterns() if re.search(pat, text)}
     if len(hits) == 1:
         op = hits.pop()
         tc.add("opname.derived",
@@ -214,7 +320,7 @@ def check_op_target_consistency(op: str, target: str | None) -> None:
     """
     if not target or op == target:
         return
-    if target in OP_ALIAS.get(op, set()):
+    if target in get_op_aliases().get(op, set()):
         return
     if op.split("_")[0] == target.split("_")[0]:  # relu_opt vs relu
         return
@@ -295,7 +401,10 @@ def _annotation_to_schema(ann: "ast.AST | None") -> str:
 def _read_op_from_side_info(run_dir: Path) -> "str | None":
     """Best-effort op-name discovery from KernelAgent side-info files.
 
-    Priority: demo_summary.json (semantic_type) > problem.txt heuristic.
+    Priority:
+      P1: demo_summary.json (experience.semantic_type) -- structured, most reliable.
+      P2: problem.py AST (Model.forward body) -- reuses PROBLEM_OP_PATTERNS.
+      P3: problem.txt free-text heuristic -- reuses PROBLEM_OP_PATTERNS.
     Returns a lowercase op name or None.
     """
     cand = run_dir / "demo_summary.json"
@@ -306,16 +415,28 @@ def _read_op_from_side_info(run_dir: Path) -> "str | None":
                 return str(st)
         except Exception:
             pass
-    prob = run_dir / "problem.txt"
-    if prob.is_file():
+
+    prob_py = run_dir / "problem.py"
+    if prob_py.is_file():
         try:
-            txt = prob.read_text(encoding="utf-8")
-            m = re.search(r"(?:op|operator|relu|sigmoid|silu)\b[^\n]*", txt, re.I)
-            hit = re.search(r"\b(relu|sigmoid|silu)\b", m.group(0), re.I) if m else None
-            if hit:
-                return hit.group(0).lower()
+            text = prob_py.read_text(encoding="utf-8")
+            hits = {name for pat, name in get_op_patterns() if re.search(pat, text)}
+            if len(hits) == 1:
+                return hits.pop()
+            # multiple hits: ambiguous, skip (caller will require op_name)
         except Exception:
             pass
+
+    prob_txt = run_dir / "problem.txt"
+    if prob_txt.is_file():
+        try:
+            txt = prob_txt.read_text(encoding="utf-8")
+            hits = {name for pat, name in get_op_patterns() if re.search(pat, txt)}
+            if len(hits) == 1:
+                return hits.pop()
+        except Exception:
+            pass
+
     return None
 
 
@@ -370,14 +491,45 @@ def _synthesize_metadata_from_existing(bundle_dir: Path, run_dir: "Path | None")
         if defs:
             meta["forward_symbol"] = next((d for d in defs if "forward" in d), defs[0])
             meta["backward_symbol"] = next((d for d in defs if "backward" in d), defs[-1])
-        if "is_musa()" in csrc:
-            meta["device"] = "musa"
-        elif "is_cuda()" in csrc:
-            meta["device"] = "cuda"
-        if "kFloat" in csrc:
-            meta["dtype"] = ["float32"]
-        elif "kHalf" in csrc:
-            meta["dtype"] = ["float16"]
+
+        # --- device detection (order: DeviceType enum > is_xxx() helper) ---
+        dt_match = re.search(
+            r"DeviceType::(\w+)", csrc,
+        )
+        if dt_match and dt_match.group(1) in _CPP_DEVICE_TYPE_TO_DEVICE:
+            meta["device"] = _CPP_DEVICE_TYPE_TO_DEVICE[dt_match.group(1)]
+        else:
+            for pattern, device in _CPP_DEVICE_TYPE_TO_DEVICE.items():
+                if f"{pattern}()" in csrc:
+                    meta["device"] = device
+                    break
+
+        # --- dtype detection (order: ScalarType enum > kXxx macro > torch.xxx string) ---
+        dtypes_found: list[str] = []
+
+        # Pattern 1: at::ScalarType::Xxx
+        for m_st in re.finditer(r"ScalarType::(\w+)", csrc):
+            mapped = _CPP_SCALAR_TYPE_TO_DTYPE.get(m_st.group(1))
+            if mapped and mapped not in dtypes_found:
+                dtypes_found.append(mapped)
+
+        # Pattern 2: at::kXxx  (macro style, e.g. at::kFloat, at::kBFloat16)
+        if not dtypes_found:
+            for m_k in re.finditer(r"\bk(\w+)\b", csrc):
+                mapped = _CPP_DTYPE_MACRO_TO_DTYPE.get(f"k{m_k.group(1)}")
+                if mapped and mapped not in dtypes_found:
+                    dtypes_found.append(mapped)
+
+        # Pattern 3: "torch.float32" / "torch.bfloat16" in TORCH_CHECK messages
+        if not dtypes_found:
+            for m_ts in re.finditer(r"torch\.(\w+)", csrc):
+                key = f"torch.{m_ts.group(1)}"
+                mapped = _TORCH_DTYPE_STR_TO_DTYPE.get(key)
+                if mapped and mapped not in dtypes_found:
+                    dtypes_found.append(mapped)
+
+        if dtypes_found:
+            meta["dtype"] = dtypes_found
 
     op = _read_op_from_side_info(run_dir or bundle_dir.parent)
     if op:
@@ -465,6 +617,70 @@ OP_FORMULAS: dict[str, dict] = {
 }
 
 
+# External op registry (Solution-B): load patterns/aliases/formulas from JSON.
+# Built-in PROBLEM_OP_PATTERNS / OP_ALIAS / OP_FORMULAS stay the default; an
+# external JSON file can extend or override them with NO code change (adding a
+# new op like rms_norm/matmul is now a data change, not a code change).
+# Source: env KERNELAGENT_OP_REGISTRY or per-request payload["op_registry"].
+# Merge policy: external entries replace built-ins for the same op/regex.
+
+def _load_op_registry_file(path: "str | None") -> "dict | None":
+    if not path:
+        return None
+    p = Path(path)
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+_OP_REGISTRY_PATH = os.environ.get("KERNELAGENT_OP_REGISTRY")
+_OP_REGISTRY: "dict | None" = _load_op_registry_file(_OP_REGISTRY_PATH)
+
+
+def set_op_registry(path: "str | None") -> None:
+    """Swap the active external registry (called from the TS tool per-request).
+
+    Passing None clears the external registry and falls back to built-ins.
+    """
+    global _OP_REGISTRY
+    _OP_REGISTRY = _load_op_registry_file(path)
+
+
+def get_op_patterns() -> "list[tuple[str, str]]":
+    """Built-in patterns, with external patterns overlaid (external wins per op)."""
+    base = list(PROBLEM_OP_PATTERNS)
+    ext = (_OP_REGISTRY or {}).get("patterns")
+    if ext:
+        ext_ops = {e["op"] for e in ext if isinstance(e, dict) and "op" in e and "regex" in e}
+        base = [t for t in base if t[1] not in ext_ops]
+        base += [(e["regex"], e["op"])
+                 for e in ext if isinstance(e, dict) and "op" in e and "regex" in e]
+    return base
+
+
+def get_op_aliases() -> "dict[str, set[str]]":
+    """Built-in aliases, with external aliases merged in."""
+    base = {k: set(v) for k, v in OP_ALIAS.items()}
+    ext = (_OP_REGISTRY or {}).get("aliases")
+    if ext:
+        for op, als in ext.items():
+            if isinstance(als, (list, set, tuple)):
+                base.setdefault(op, set()).update(als)
+    return base
+
+
+def get_op_formula(op: str) -> "dict | None":
+    """Return the backward formula for `op` (external first, then built-in)."""
+    ext = (_OP_REGISTRY or {}).get("formulas")
+    if ext and op in ext and isinstance(ext[op], dict):
+        return ext[op]
+    return OP_FORMULAS.get(op)
+
+
 INJECTION_BLOCK_START = "# ===== kernelagent-runtime injection (auto-generated by kernelagent-injector) ====="
 INJECTION_BLOCK_END = "# ===== end injection ====="
 
@@ -504,15 +720,31 @@ def analyze_train_script(script: Path, op: str) -> dict:
     tensor_method_used = False
     stateful_op = False
     last_import_line = 0
-    # Stateful ops whose kernel is a pure function and cannot carry running
-    # stats/buffers; we keep them native instead of patching (R7 D-R7-1).
-    # Detection is scoped to the op being injected: a script that merely uses
-    # BatchNorm while we are patching relu must NOT be skipped.
-    _stateful_ops = {"batch_norm", "instance_norm", "layer_norm"}
+    # nn.Module class registry: nn class name -> {op, stateful}.
+    # Used for nn.<Class>() detection and stateful-op scoping.
+    _nn_module_registry: dict[str, dict] = {
+        # Elementwise activations (stateful=False)
+        "ReLU":        {"op": "relu",        "stateful": False},
+        "Sigmoid":     {"op": "sigmoid",     "stateful": False},
+        "SiLU":        {"op": "silu",        "stateful": False},
+        "GELU":        {"op": "gelu",        "stateful": False},
+        "Tanh":        {"op": "tanh",        "stateful": False},
+        "LeakyReLU":   {"op": "leaky_relu",  "stateful": False},
+        "ELU":         {"op": "elu",         "stateful": False},
+        "Hardswish":   {"op": "hardswish",   "stateful": False},
+        "Softplus":    {"op": "softplus",    "stateful": False},
+        # Stateful ops (running stats / buffers)
+        "BatchNorm1d": {"op": "batch_norm",    "stateful": True},
+        "BatchNorm2d": {"op": "batch_norm",    "stateful": True},
+        "BatchNorm3d": {"op": "batch_norm",    "stateful": True},
+        "InstanceNorm1d": {"op": "instance_norm", "stateful": True},
+        "InstanceNorm2d": {"op": "instance_norm", "stateful": True},
+        "InstanceNorm3d": {"op": "instance_norm", "stateful": True},
+        "LayerNorm":   {"op": "layer_norm",   "stateful": True},
+    }
+    _stateful_ops = {v["op"] for v in _nn_module_registry.values() if v["stateful"]}
     _stateful_class_to_op = {
-        "BatchNorm1d": "batch_norm", "BatchNorm2d": "batch_norm", "BatchNorm3d": "batch_norm",
-        "InstanceNorm1d": "instance_norm", "InstanceNorm2d": "instance_norm", "InstanceNorm3d": "instance_norm",
-        "LayerNorm": "layer_norm",
+        k: v["op"] for k, v in _nn_module_registry.items() if v["stateful"]
     }
 
     for node in ast.walk(tree):
@@ -531,14 +763,18 @@ def analyze_train_script(script: Path, op: str) -> dict:
                         aliases[alias.asname or alias.name] = "nn"
             elif module == "torch.nn.functional":
                 for alias in node.names:
-                    if alias.name == "relu":
-                        aliases[alias.asname or alias.name] = "F.relu"
+                    # Detect `from torch.nn.functional import <op>` for any op;
+                    # register the imported name as an F-channel alias.
+                    if alias.name == op:
+                        aliases[alias.asname or alias.name] = "F"
             last_import_line = max(last_import_line, node.end_lineno or node.lineno)
         elif isinstance(node, ast.Call):
             func = node.func
-            # Detect nn.ReLU() instantiation
-            if isinstance(func, ast.Attribute) and func.attr == "ReLU":
-                nn_module_used = True
+            # Detect nn.<Class>() for any registered class; set nn_module_used
+            # when the class maps to the op currently being injected.
+            if isinstance(func, ast.Attribute) and func.attr in _nn_module_registry:
+                if _nn_module_registry[func.attr]["op"] == op:
+                    nn_module_used = True
             # Detect functional call forms
             if isinstance(func, ast.Attribute) and func.attr == op:
                 if isinstance(func.value, ast.Name) and func.value.id in aliases:
@@ -634,8 +870,9 @@ def _get_backward_info(op: str, op_dir: "Path | None" = None, meta: "dict | None
         if mode == "eager" or "backward" in meta:
             return {"mode": "eager", **meta.get("backward", {})}
 
-    if op in OP_FORMULAS:
-        return {"mode": "eager", **OP_FORMULAS[op]}
+    _f = get_op_formula(op)
+    if _f is not None:
+        return {"mode": "eager", **_f}
 
     raise BridgeError(
         f"no backward info for op '{op}'; "
@@ -1034,6 +1271,28 @@ def materialize_bundle_from_payload(payload_py: Path, staging_root: Path) -> Pat
     return bundle
 
 
+def materialize_bundle_from_result_json(
+    json_path: Path, staging_root: Path, kernel_code: dict, full: dict
+) -> Path:
+    """Materialize a KernelAgent result.json into a deployable bundle dir.
+
+    kernel_code maps filename->source text; an optional top-level metadata
+    block is written as metadata.json so the injector consumes it verbatim.
+    """
+    bundle = staging_root / json_path.stem / "best_bundle"
+    if bundle.exists():
+        shutil.rmtree(bundle)
+    bundle.mkdir(parents=True)
+    for name, code in kernel_code.items():
+        (bundle / name.strip()).write_text(code, encoding="utf-8")
+    meta = full.get("metadata") if isinstance(full, dict) else None
+    if isinstance(meta, dict) and meta:
+        (bundle / "metadata.json").write_text(
+            json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    return bundle
+
+
 def resolve_source(
     source: str, working_dir: Path, staging_root: Path,
     allow_baseline: bool = True, trace: TraceCollector | None = None
@@ -1109,7 +1368,30 @@ def resolve_source(
             "best_bundle_dir": str(materialized),
             "backend": detect_backend(materialized),
             "status": "UNKNOWN",
-            "problem_py": _find_problem_py(p.parent, None),
+        "problem_py": _find_problem_py(p.parent, None),
+    }
+
+    # KernelAgent result.json (kernel_code dict) -> materialize + optional metadata.
+    # A top-level metadata block is written as metadata.json and consumed verbatim.
+    if p.is_file() and p.suffix == ".json":
+        dj = _load_json_file(p)
+        kc = dj.get("kernel_code") if isinstance(dj, dict) else None
+        if not isinstance(kc, dict) or not kc:
+            raise BridgeError(
+                f"{p} is not a KernelAgent result.json (no 'kernel_code' dict found)"
+            )
+        bundle = materialize_bundle_from_result_json(p, staging_root, kc, dj)
+        tc.add("source.resolved",
+               f"result.json -> {bundle}, kind=serialized_json, "
+               f"metadata={'yes' if isinstance(dj.get('metadata'), dict) else 'no'}")
+        return {
+            "kind": "serialized_json",
+            "example": "",
+            "run_dir": "",
+            "best_bundle_dir": str(bundle),
+            "backend": detect_backend(bundle),
+            "status": _status_of(dj) or "UNKNOWN",
+            "problem_py": "",
         }
 
     # S2: directory path
@@ -1478,35 +1760,57 @@ _ops_registered = _OP  # introspection helper
 '''
 
 
-# --------------------------------------------------------------------------- #
-# Verify: pull the real training task's run command/script and execute it to
-# confirm the operator is actually wired in. This is a required step of the
-# kernelagent_inject flow (per design): deploy alone is not enough evidence.
-# --------------------------------------------------------------------------- #
-
-# Convention: <KERNELAGENT_TRAIN_DIR>/verify_tasks.json maps op -> {steps:[...]}.
-# Each step: {"name", "cmd", "expect_contains"?, "expect_kernel_calls_gt"?}.
-# If the file is absent or has no entry for the op, fall back to these defaults.
-DEFAULT_VERIFY_TASKS: dict[str, list[dict]] = {
-    "relu": [
-        {"name": "smoke", "cmd": "python test_relu_smoke.py", "expect_contains": "[PASS]"},
-        {"name": "forward_only", "cmd": "python test_relu_forward_only.py", "expect_contains": "[PASS]"},
-        {
-            "name": "train",
-            "cmd": "python train_mnist_musa_injected.py --epochs 1",
-            "expect_contains": "[ok] training finished",
-            "expect_kernel_calls_gt": 0,
-        },
-    ],
-}
-
+# Verify: run the real training task's command to confirm the operator is wired
+# in (required by design; deploy alone is not sufficient evidence).
+# Convention: verify_tasks.json maps op -> {steps:[...]}; each step has
+# name/cmd/expect_contains/expect_kernel_calls_gt. Missing or no-op entries fall
+# back to convention defaults derived from train_dir file naming.
 KERNEL_CALLS_RE = re.compile(r"(\w+)\s+kernel calls\s*=\s*(\d+)")
 VERIFY_STEP_TIMEOUT_S = 1800
 
 
+def _default_verify_tasks(op: str, train_dir: "Path | None") -> list[dict]:
+    """Generate default verify tasks from train_dir file-naming conventions.
+    Conventions: test_{op}_forward_only.py and train_*_injected.py (first match).
+    Replaces the old relu-only DEFAULT_VERIFY_TASKS table so new ops get
+    sensible defaults without code changes when test scripts follow it.
+    """
+    steps: list[dict] = []
+    if train_dir is None or not train_dir.is_dir():
+        raise BridgeError(
+            f"no verify tasks for op '{op}'; no train_dir available and no "
+            f"verify_tasks.json. Pass verify_cmd, train_script, add a "
+            f"verify_tasks.json entry, or pass verify=false."
+        )
+    # T2-F: forward-only test (convention: test_{op}_forward_only.py)
+    fwd = train_dir / f"test_{op}_forward_only.py"
+    if fwd.is_file():
+        steps.append({
+            "name": "forward_only",
+            "cmd": f"python test_{op}_forward_only.py",
+            "expect_contains": "[PASS]",
+        })
+    # T2-B: training test (convention: train_*_injected.py — first match)
+    injected = sorted(train_dir.glob("train_*_injected.py"))
+    if injected:
+        steps.append({
+            "name": "train",
+            "cmd": f"python {injected[0].name} --epochs 1",
+            "expect_contains": "[ok] training finished",
+            "expect_kernel_calls_gt": 0,
+        })
+    if not steps:
+        raise BridgeError(
+            f"no verify tasks for op '{op}' in {train_dir} and no convention "
+            f"files found (expected test_{op}_smoke.py / test_{op}_forward_only.py "
+            f"/ train_*_injected.py). Add a verify_tasks.json entry or pass verify=false."
+        )
+    return steps
+
+
 def _load_verify_tasks(train_dir: Path, op: str) -> list[dict]:
     """Fetch the real training task steps for the op from the train dir
-    convention file, falling back to built-in defaults for known ops."""
+    convention file, falling back to convention-based defaults."""
     vf = train_dir / "verify_tasks.json"
     if vf.is_file():
         try:
@@ -1518,12 +1822,7 @@ def _load_verify_tasks(train_dir: Path, op: str) -> list[dict]:
                 return tasks
         except (json.JSONDecodeError, AttributeError):
             pass
-    if op in DEFAULT_VERIFY_TASKS:
-        return DEFAULT_VERIFY_TASKS[op]
-    raise BridgeError(
-        f"no verify tasks for op '{op}' in {vf} and no built-in default; "
-        f"add a verify_tasks.json entry or pass verify=false"
-    )
+    return _default_verify_tasks(op, train_dir)
 
 
 def _resolve_train_python() -> str:
@@ -1575,7 +1874,7 @@ def _resolve_verify_steps(
     P1: verify_cmd (user-provided, highest)
     P2: train_script derived (R6-generated injected script)
     P3: verify_tasks.json convention file
-    P4: built-in DEFAULT_VERIFY_TASKS (lowest)
+    P4: convention-based defaults from train_dir file naming
     """
     tc = trace
 
@@ -1621,16 +1920,11 @@ def _resolve_verify_steps(
             except (json.JSONDecodeError, AttributeError):
                 pass
 
-    # P4: built-in defaults
-    if op in DEFAULT_VERIFY_TASKS:
-        if tc:
-            tc.add("verify.step", f"P4 DEFAULT_VERIFY_TASKS -> {len(DEFAULT_VERIFY_TASKS[op])} steps")
-        return DEFAULT_VERIFY_TASKS[op]
-
-    raise BridgeError(
-        f"no verify tasks for op '{op}'; "
-        f"pass verify_cmd, train_script, add verify_tasks.json, or pass verify=false"
-    )
+    # P4: convention-based defaults
+    default_steps = _default_verify_tasks(op, train_dir)
+    if tc:
+        tc.add("verify.step", f"P4 convention defaults -> {len(default_steps)} steps")
+    return default_steps
 
 
 def do_verify(
@@ -1760,7 +2054,7 @@ def do_deploy(payload: dict, working_dir: Path) -> dict:
         )
     bundle_dir = Path(ref["best_bundle_dir"])
     backend = ref["backend"]
-    files = MUSA_FILES if backend == "musa" else TRITON_FILES
+    files = _bundle_files_for(backend)
 
     # S7-1: synthesise/read metadata (Solution-A unified entry point) and
     # cross-check the extension name against kernel.py (A8/R3).
@@ -1772,17 +2066,22 @@ def do_deploy(payload: dict, working_dir: Path) -> dict:
     tc.add("meta.read", f"_read_metadata => op={meta.get('op')!r} backward_mode={meta.get('backward_mode')!r}")
     _cross_check_extension(meta, bundle_dir / "kernel.py", tc)
 
-    # R5: skip CUDA-backend operators (still in development); abort before build.
-    if _is_cuda_backend(bundle_dir, meta):
+    # R5 (revised): backend-support gate; cuda is recognised but not yet deployable.
+    if backend not in DEPLOY_SUPPORTED_BACKENDS:
+        is_cuda = _is_cuda_backend(bundle_dir, meta)
+        reason = "cuda_backend_not_supported" if is_cuda else "backend_not_supported_yet"
         msg = (
-            "[ka-inject] CUDA backend operator detected — "
-            "CUDA branch still in development (doing...); "
-            "deployment aborted. Use a MUSA/triton bundle for now."
+            f"[ka-inject] backend '{backend}' operator detected — "
+            f"deployment for this backend is not supported in the current "
+            f"release (supported: {', '.join(DEPLOY_SUPPORTED_BACKENDS)}). "
+            f"Use a MUSA/triton bundle for now."
+            + (" CUDA support is planning." if is_cuda else "")
         )
         print(msg)
         return {
             "status": "skipped",
-            "reason": "cuda_backend_not_supported",
+            "reason": reason,
+            "backend": backend,
             "message": msg,
             "op": meta.get("op"),
             "trace": tc.to_list(),
@@ -1879,7 +2178,7 @@ def do_deploy(payload: dict, working_dir: Path) -> dict:
     )
 
     build_info: dict = {"performed": False, "success": True, "ext_name": None, "log": None}
-    if want_build and backend == "musa":
+    if want_build and backend in BUILDABLE_BACKENDS:
         build_info["performed"] = True
         build_info["ext_name"] = meta.get("extension_module") or parse_ext_name(op_dir / "setup.py")
         log_path = op_dir / "build.log"
@@ -2037,18 +2336,31 @@ def do_deploy(payload: dict, working_dir: Path) -> dict:
             f"PYTHONPATH={store_str}:$PYTHONPATH && {cmd}"
         )
     elif train_dir and train_dir.is_dir():
-        run_block = (
-            "```bash\n"
-            f"cd {train_dir}\n"
-            f"export PYTHONPATH={store_str}:$PYTHONPATH\n"
-            f"python test_relu_smoke.py        # T1: numeric check vs F.relu\n"
-            f"python test_relu_forward_only.py  # T2-F: forward-only safety\n"
-            f"python train_mnist_musa_injected.py --epochs 1  # T2-B: full training\n"
-            "```\n"
-        )
+        # fix-5: dynamically generate hint commands from verify steps
+        # instead of hardcoding relu-specific test commands
+        hint_lines = [f"cd {train_dir}", f"export PYTHONPATH={store_str}:$PYTHONPATH"]
+        _fallback_steps: list[dict] | None = None
+        if verify_result and verify_result.get("steps"):
+            for s in verify_result["steps"]:
+                hint_lines.append(f"{s['cmd']}  # {s['name']}")
+        else:
+            # fallback: use convention-based defaults
+            try:
+                _fallback_steps = _default_verify_tasks(op, train_dir)
+                for s in _fallback_steps:
+                    hint_lines.append(f"{s['cmd']}  # {s['name']}")
+            except BridgeError:
+                hint_lines.append(f"# no verify tasks found for op '{op}'")
+        run_block = "```bash\n" + "\n".join(hint_lines) + "\n```\n"
+        # activation_hint: use the last step's command (typically training)
+        if verify_result and verify_result.get("steps"):
+            last_cmd = verify_result["steps"][-1]["cmd"]
+        elif _fallback_steps:
+            last_cmd = _fallback_steps[-1]["cmd"]
+        else:
+            last_cmd = f"python -c 'import torch; print(torch.ops.kernelagent.{op})'"
         activation_hint = (
-            f"cd {train_dir} && export PYTHONPATH={store_str}:$PYTHONPATH && "
-            f"python train_mnist_musa_injected.py --epochs 1"
+            f"cd {train_dir} && export PYTHONPATH={store_str}:$PYTHONPATH && {last_cmd}"
         )
     else:
         run_block = (

@@ -1,0 +1,35 @@
+{
+  "_comment": "外部算子注册表：扩展/覆盖内置 PROBLEM_OP_PATTERNS / OP_ALIAS / OP_FORMULAS，无需改代码。由 KERNELAGENT_OP_REGISTRY 环境变量或 payload.op_registry 指定路径。",
+  "patterns": [
+    { "regex": "\\b(?:torch|F)\\.rms_norm\\b", "op": "rms_norm" },
+    { "regex": "\\bnn\\.RMSNorm\\b", "op": "rms_norm" },
+    { "regex": "\\b(?:torch|F)\\.gelu\\b", "op": "gelu" },
+    { "regex": "\\bF\\.layer_norm\\b", "op": "layer_norm" },
+    { "regex": "\\b(?:torch|F)\\.softmax\\b", "op": "softmax" }
+  ],
+  "aliases": {
+    "rms_norm": ["rms_norm", "rmsnorm", "rms_norm_"],
+    "gelu": ["gelu", "gelu_"],
+    "layer_norm": ["layer_norm", "layernorm"],
+    "softmax": ["softmax", "softmax_"]
+  },
+  "formulas": {
+    "rms_norm": {
+      "save": ["x", "weight", "eps"],
+      "backward": "var = x.pow(2).mean(-1, keepdim=True); rstd = torch.rsqrt(var + eps); dx = grad_out * rstd * weight; return dx",
+      "schema": "Tensor(Tensor x, Tensor weight, float eps) -> Tensor"
+    },
+    "gelu": {
+      "save": ["x"],
+      "backward": "return grad_out * (0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)) + x * (1.0 / math.sqrt(math.pi)) * torch.exp(-0.5 * x * x))"
+    },
+    "layer_norm": {
+      "save": ["x", "weight", "bias", "eps", "mean", "rstd"],
+      "backward": "return grad_out * rstd * weight"
+    },
+    "softmax": {
+      "save": ["y"],
+      "backward": "return grad_out * y - (grad_out * y).sum(-1, keepdim=True) * y"
+    }
+  }
+}
