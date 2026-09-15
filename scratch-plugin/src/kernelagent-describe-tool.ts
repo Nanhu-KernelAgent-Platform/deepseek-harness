@@ -7,7 +7,6 @@ import {
 } from './kernelagent-config-tool.ts'
 import {
   buildKernelAgentPrompt,
-  getLastForwardDescribe2,
   setPreparedPrompt,
   type DescribeKind,
 } from './kernelagent-prompt-store.ts'
@@ -19,6 +18,8 @@ Rules:
 - Exactly one class subclassing torch.nn.Module (name it Model unless Describe1 names another).
 - Implement __init__ (create parameters/buffers referenced by the formulas) and forward.
 - The forward method MUST contain the Describe1 formula lines (or their direct equivalent), not a rewritten algorithm that drops them.
+- Define top-level get_inputs() returning a list or tuple of representative CPU tensors and scalar forward arguments.
+- Define top-level get_init_inputs() returning constructor arguments, or an empty list when Model takes none.
 - Keep imports minimal: torch and torch.nn as needed.
 
 Example:
@@ -37,16 +38,26 @@ class Model(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         output = torch.matmul(x, self.weight)
-        return output`
+        return output
 
-const DESCRIBE2_SYSTEM_BACKWARD = `You turn Describe1 operator formulas into Describe2 for the REVERSE / backward operator.
+def get_inputs():
+    return [torch.randn(32, 64)]
+
+def get_init_inputs():
+    return [64, 128]`
+
+const DESCRIBE2_SYSTEM_FORWARD_BACKWARD = `You turn Describe1 operator formulas into Describe2 for one bound forward/backward operator.
 
 Rules:
 - Output ONLY Python source. No Markdown fences. No prose before or after the code.
-- Provide a torch.autograd.Function subclass (name it ModelBackward unless Describe1 names another) that contains a static backward method.
-- If a forward reference class is provided, keep its math consistent when deriving gradients.
-- backward must return gradients for each forward input/parameter that requires grad.
-- Keep imports minimal: torch (and torch.nn only if needed).
+- Provide one torch.autograd.Function subclass whose forward implements the Describe1 formula and whose backward analytically derives its gradients.
+- Provide one torch.nn.Module wrapper named Model that calls that Function, so forward and backward are tested and generated as a single operator.
+- Save every value required by backward in ctx and return gradients for every differentiable forward input or parameter.
+- The KernelAgent task must generate, verify, and bind forward and backward in one native kernel bundle, then optimize their performance separately.
+- Do not create a second independent backward task.
+- Define top-level get_inputs() returning a list or tuple of representative CPU tensors and scalar forward arguments.
+- Define top-level get_init_inputs() returning constructor arguments, or an empty list when Model takes none.
+- Keep imports minimal: torch and torch.nn as needed.
 
 Example:
 Describe1 formula:
@@ -55,7 +66,7 @@ Describe1 formula:
 Describe2 must look like:
 import torch
 
-class ModelBackward(torch.autograd.Function):
+class ModelFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         ctx.save_for_backward(x, weight)
@@ -67,46 +78,52 @@ class ModelBackward(torch.autograd.Function):
         x, weight = ctx.saved_tensors
         grad_x = torch.matmul(grad_output, weight.transpose(-2, -1))
         grad_weight = torch.matmul(x.transpose(-2, -1), grad_output)
-        return grad_x, grad_weight`
+        return grad_x, grad_weight
+
+class Model(torch.nn.Module):
+    def forward(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        return ModelFunction.apply(x, weight)
+
+def get_inputs():
+    return [torch.randn(32, 64), torch.randn(64, 128)]
+
+def get_init_inputs():
+    return []`
 
 const BACKWARD_INTENT = /反向|backward|reverse\s*op|reverse\s*operator|gradient|grad_output|反传/i
 
 /**
- * Resolve whether Describe2 should be forward or backward.
+ * Resolve whether Describe2 should cover forward only or bound forward/backward.
  * Explicit kind wins; otherwise detect reverse intent in Describe1 text.
  * @param kind - optional tool argument.
  * @param describe1 - dialog text.
- * @returns forward or backward.
+ * @returns forward or forward_backward.
  */
 export function resolveDescribeKind(kind: unknown, describe1: string): DescribeKind {
-  if (kind === 'forward' || kind === 'backward') return kind
-  return BACKWARD_INTENT.test(describe1) ? 'backward' : 'forward'
+  if (kind === 'forward' || kind === 'forward_backward') return kind
+  return BACKWARD_INTENT.test(describe1) ? 'forward_backward' : 'forward'
 }
 
 /**
  * Build the user message that asks the LLM for Describe2.
  * @param describe1 - dialog / formula text.
- * @param kind - forward or backward.
- * @param forwardDescribe2 - optional prior forward class for backward generation.
+ * @param kind - forward only or bound forward/backward.
  * @returns chat user content.
  */
 export function buildDescribe2UserMessage(
   describe1: string,
   kind: DescribeKind = 'forward',
-  forwardDescribe2?: string,
 ): string {
-  if (kind === 'backward') {
-    const lines = [
-      'Convert the following Describe1 into Describe2 for the REVERSE operator.',
-      'Describe2 must be a Class that contains a backward method (torch.autograd.Function).',
+  if (kind === 'forward_backward') {
+    return [
+      'Convert the following Describe1 into one bound forward/backward Describe2.',
+      'Derive the backward formula from the forward formula.',
+      'Describe2 must contain a torch.autograd.Function with both forward and backward plus an nn.Module wrapper named Model.',
+      'KernelAgent must generate, verify, and bind both directions as one native kernel bundle, then optimize each direction separately.',
       '',
       'Describe1:',
       describe1.trim(),
-    ]
-    if (forwardDescribe2 && forwardDescribe2.trim() !== '') {
-      lines.push('', 'Forward Describe2 reference (keep math consistent):', forwardDescribe2.trim())
-    }
-    return lines.join('\n')
+    ].join('\n')
   }
   return [
     'Convert the following Describe1 into Describe2.',
@@ -185,11 +202,10 @@ export async function generateDescribe2(args: {
   model: string
   describe1: string
   kind: DescribeKind
-  forwardDescribe2?: string
   signal?: AbortSignal
 }): Promise<string> {
   const endpoint = resolveChatCompletionsUrl(args.baseURL)
-  const system = args.kind === 'backward' ? DESCRIBE2_SYSTEM_BACKWARD : DESCRIBE2_SYSTEM_FORWARD
+  const system = args.kind === 'forward_backward' ? DESCRIBE2_SYSTEM_FORWARD_BACKWARD : DESCRIBE2_SYSTEM_FORWARD
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
@@ -202,7 +218,7 @@ export async function generateDescribe2(args: {
         { role: 'system', content: system },
         {
           role: 'user',
-          content: buildDescribe2UserMessage(args.describe1, args.kind, args.forwardDescribe2),
+          content: buildDescribe2UserMessage(args.describe1, args.kind),
         },
       ],
     }),
@@ -244,14 +260,14 @@ export function apply(ctx: Context) {
     text: `Before calling kernelagent in generate, fuse, or optimize mode, you MUST call kernelagent_describe first.
 kernelagent_describe collects the dialog as Describe1, generates Describe2, stores the combined prompt, and returns it.
 Use kind=forward (default) for a PyTorch nn.Module whose forward contains the formula.
-Use kind=backward when the user also wants a reverse/backward operator: after the forward kernelagent run succeeds, call kernelagent_describe again with kind=backward (it reuses the last forward Describe2), then call kernelagent again with the new prepared prompt.
+Use kind=forward_backward when the user wants gradients or a reverse/backward operator. It derives Describe2 for both directions so one following kernelagent call generates, binds, and verifies the complete operator, then automatically optimizes forward and backward separately. Never split this into separate forward and backward kernelagent calls.
 Do not invent problem_code for gated modes: the gate injects the prepared prompt.
 run_example mode does not require kernelagent_describe.`,
   })
 
   ctx.tools.register(defineTool({
     name: 'kernelagent_describe',
-    description: 'Prepare the KernelAgent prompt: collect dialog as Describe1, generate a forward or backward PyTorch class as Describe2, and store the combined prompt that kernelagent must receive. Call again with kind=backward after a successful forward run when the user wants the reverse operator.',
+    description: 'Prepare one KernelAgent prompt from the dialog. Generate either a forward-only PyTorch class or a bound forward/backward reference whose gradients are derived from the forward formula.',
     parameters: {
       dialog: {
         type: 'string',
@@ -259,8 +275,8 @@ run_example mode does not require kernelagent_describe.`,
       },
       kind: {
         type: 'string',
-        enum: ['forward', 'backward'],
-        description: 'forward: nn.Module with forward formula. backward: autograd.Function with backward. Omit to infer from dialog (反向/backward/reverse).',
+        enum: ['forward', 'forward_backward'],
+        description: 'forward: nn.Module with forward formula. forward_backward: one bound reference with derived backward. Omit to infer from dialog.',
       },
     },
     output: {
@@ -268,7 +284,7 @@ run_example mode does not require kernelagent_describe.`,
         type: 'object',
         additionalProperties: false,
         properties: {
-          kind: { type: 'string', enum: ['forward', 'backward'] },
+          kind: { type: 'string', enum: ['forward', 'forward_backward'] },
           describe1: { type: 'string' },
           describe2: { type: 'string' },
           prompt: { type: 'string' },
@@ -301,7 +317,6 @@ run_example mode does not require kernelagent_describe.`,
 
       const kind = resolveDescribeKind(args.kind, describe1)
       const sessionId = String(agent.session.id)
-      const forwardDescribe2 = kind === 'backward' ? getLastForwardDescribe2(sessionId) : undefined
 
       const describe2 = await generateDescribe2({
         baseURL: globalConfig.baseURL,
@@ -309,7 +324,6 @@ run_example mode does not require kernelagent_describe.`,
         model: globalConfig.modelName,
         describe1,
         kind,
-        forwardDescribe2,
         signal: exec.signal,
       })
       const prompt = buildKernelAgentPrompt(describe1, describe2, kind)

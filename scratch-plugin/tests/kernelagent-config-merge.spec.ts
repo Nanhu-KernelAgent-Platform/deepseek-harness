@@ -4,9 +4,14 @@ let apply: (ctx: any) => void
 
 let mergeKernelAgentConfig: (args: any, globalConfig: any) => Record<string, unknown>
 
+let resolveDescribeKind: (kind: unknown, describe1: string) => string
+let buildDescribe2UserMessage: (describe1: string, kind?: 'forward' | 'forward_backward') => string
+let buildKernelAgentPrompt: (describe1: string, describe2: string, kind?: 'forward' | 'forward_backward') => string
 beforeAll(async () => {
   vi.stubEnv('KERNELAGENT_BRIDGE', '/tmp/kernelagent_bridge.py')
   vi.stubEnv('KERNELAGENT_WORKING_DIR', '/tmp')
+  ;({ resolveDescribeKind, buildDescribe2UserMessage } = await import('../src/kernelagent-describe-tool.ts'))
+  ;({ buildKernelAgentPrompt } = await import('../src/kernelagent-prompt-store.ts'))
   ;({ mergeKernelAgentConfig, apply } = await import('../src/kernelagent-tool.ts'))
 })
 
@@ -66,9 +71,30 @@ describe('mergeKernelAgentConfig', () => {
   })
 })
 
+
+describe('combined forward/backward preparation', () => {
+  it('infers one bound task when the dialog requests backward generation', () => {
+    expect(resolveDescribeKind(undefined, '生成正向并自动推导反向算子')).toBe('forward_backward')
+    expect(resolveDescribeKind(undefined, 'generate the forward kernel')).toBe('forward')
+  })
+
+  it('instructs KernelAgent to bind once and optimize each direction separately', () => {
+    const message = buildDescribe2UserMessage('output = x * x', 'forward_backward')
+    expect(message).toContain('Derive the backward formula')
+    expect(message).toContain('optimize each direction separately')
+
+    const prompt = buildKernelAgentPrompt(
+      'output = x * x',
+      'class Model(torch.nn.Module): ...',
+      'forward_backward',
+    )
+    expect(prompt).toContain('one bound operator implementation with forward and derived backward')
+  })
+})
 describe('KernelAgent result projection', () => {
   const definition = () => {
     let tool: any
+
     apply({ systemPrompt: { section: () => {} }, tools: { register: (value: any) => { tool = value } }, on: () => {} })
     return tool
   }

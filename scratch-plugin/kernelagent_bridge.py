@@ -2,6 +2,7 @@
 """KernelAgent Harness bridge with runtime-selectable model and GPU backend."""
 
 import argparse
+import ast
 import json
 import sys
 import os
@@ -99,6 +100,72 @@ def apply_runtime_credentials(payload: dict) -> None:
         pass
 
 
+def render_optimizer_kernel(kernel_code):
+    """Render a native bundle for the optimizer's model-facing input."""
+    if isinstance(kernel_code, dict):
+        from triton_kernel_agent.kernel_backend import KernelBundle
+        return KernelBundle(kernel_code).render_for_prompt()
+    if hasattr(kernel_code, "render_for_prompt"):
+        return kernel_code.render_for_prompt()
+    return kernel_code
+
+
+def validate_optimization_problem(problem_code: str) -> None:
+    """Reject non-importable benchmark references before starting optimization."""
+    try:
+        tree = ast.parse(problem_code)
+    except SyntaxError as exc:
+        raise ValueError(f"Describe2 is not valid Python for optimization: {exc}") from exc
+    functions = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    classes = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+    missing = []
+    if "Model" not in classes:
+        missing.append("Model")
+    if "get_inputs" not in functions:
+        missing.append("get_inputs()")
+    if missing:
+        raise ValueError("Describe2 cannot be benchmarked; missing " + ", ".join(missing))
+
+
+def run_auto_optimization(payload: dict, initial_kernel, tests) -> dict:
+    """Optimize a generated bundle once per requested execution direction."""
+    directions = (
+        ("forward", "backward")
+        if payload.get("describe_kind") == "forward_backward"
+        else ("forward",)
+    )
+    current_kernel = render_optimizer_kernel(initial_kernel)
+    # Generation uses the combined dialog prompt, but benchmark loaders import
+    # this value as Python. Use executable Describe2 alone for optimization.
+    optimization_problem = payload.get("reference_code") or payload.get("problem_code", "")
+    validate_optimization_problem(optimization_problem)
+    directional = {}
+    optimized = None
+    for direction in directions:
+        optimized = run_optimize({
+            **payload,
+            "problem_code": optimization_problem,
+            "initial_kernel": current_kernel,
+            "test_code": tests,
+            "options": {
+                **payload.get("options", {}),
+                "optimization_target": direction,
+            },
+        })
+        directional[direction] = {
+            key: value for key, value in optimized.items()
+            if key not in ("kernel_code", "files", "top_kernels")
+        }
+        if not optimized.get("success") or not optimized.get("kernel_code"):
+            return {
+                "success": False,
+                "error": optimized.get("error") or f"{direction} optimization returned no verified kernel",
+                "failed_direction": direction,
+                "directional_optimizations": directional,
+            }
+        current_kernel = render_optimizer_kernel(optimized["kernel_code"])
+    return {**optimized, "directional_optimizations": directional}
+
 def run_generate(payload: dict) -> dict:
     from triton_kernel_agent import TritonKernelAgent
     from triton_kernel_agent.platform_config import get_platform
@@ -144,12 +211,6 @@ def run_generate(payload: dict) -> dict:
         return {**payload_out, "optimization_status": "skipped"}
 
     try:
-        initial_kernel = result["kernel_code"]
-        if isinstance(initial_kernel, dict):
-            from triton_kernel_agent.kernel_backend import KernelBundle
-            initial_kernel = KernelBundle(initial_kernel).render_for_prompt()
-        elif hasattr(initial_kernel, "render_for_prompt"):
-            initial_kernel = initial_kernel.render_for_prompt()
         tests = payload.get("test_code")
         if result.get("session_dir"):
             test_paths = sorted(Path(result["session_dir"]).glob("test_*.py"))
@@ -157,11 +218,9 @@ def run_generate(payload: dict) -> dict:
                 tests = [path.read_text(encoding="utf-8") for path in test_paths]
         if not tests:
             raise ValueError("No generation verification tests available for optimization")
-        optimized = run_optimize({
-            **payload,
-            "initial_kernel": initial_kernel,
-            "test_code": tests,
-        })
+        optimized = run_auto_optimization(
+            payload, result["kernel_code"], tests
+        )
     except Exception as exc:
         optimized = {"success": False, "error": str(exc)}
     if not optimized.get("success") or not optimized.get("kernel_code"):
@@ -169,6 +228,8 @@ def run_generate(payload: dict) -> dict:
             **payload_out,
             "optimization_status": "failed",
             "optimization_error": optimized.get("error") or "Optimization returned no verified kernel",
+            "failed_direction": optimized.get("failed_direction"),
+            "directional_optimizations": optimized.get("directional_optimizations", {}),
         }
     # Paths and files from generation must never be advertised as the optimized output.
     return {
@@ -246,7 +307,14 @@ def run_optimize(payload: dict) -> dict:
 
     options = payload.get("options", {})
     backend, test_timeout_s = resolve_backend_timeout(options, 600)
-    problem_path = write_problem_file(payload.get("problem_code", ""))
+    optimization_target = str(options.get("optimization_target") or "forward")
+    problem_code = payload.get("problem_code", "")
+    if optimization_target in ("forward", "backward"):
+        problem_code = (
+            f'KERNELAGENT_OPTIMIZATION_TARGET = "{optimization_target}"\n'
+            f'# Optimize {optimization_target} latency while preserving correctness of the bound operator.\n{problem_code}'
+        )
+    problem_path = write_problem_file(problem_code)
     initial_kernel = payload.get("initial_kernel", "")
     if not initial_kernel:
         return {"success": False, "error": "optimize mode requires initial_kernel"}

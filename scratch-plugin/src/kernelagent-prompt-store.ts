@@ -8,7 +8,7 @@
 const PROMPT_GATED_MODES = new Set(['generate', 'fuse', 'optimize'])
 
 /** Which operator side Describe2 targets. */
-export type DescribeKind = 'forward' | 'backward'
+export type DescribeKind = 'forward' | 'forward_backward'
 
 /**
  * Whether a kernelagent call must consume a prepared describe prompt.
@@ -22,25 +22,23 @@ export function requiresPreparedPrompt(mode: unknown): boolean {
 export interface PreparedKernelAgentPrompt {
   /** Dialog text collected as Describe1. */
   describe1: string
-  /** PyTorch class generated as Describe2 (forward or backward). */
+  /** PyTorch source generated as Describe2. */
   describe2: string
   /** Combined prompt passed to KernelAgent as problem_code. */
   prompt: string
-  /** Whether Describe2 is the forward or backward operator class. */
+  /** Whether Describe2 covers forward only or bound forward/backward behavior. */
   kind: DescribeKind
   /** Wall-clock time when the prompt was prepared. */
   preparedAt: number
 }
 
 const store = new Map<string, PreparedKernelAgentPrompt>()
-/** Survives prompt consumption so a later backward describe can reuse it. */
-const lastForwardDescribe2 = new Map<string, string>()
 
 /**
  * Build the KernelAgent problem prompt from Describe1 and Describe2.
  * @param describe1 - dialog text.
  * @param describe2 - generated PyTorch class.
- * @param kind - forward or backward Describe2.
+ * @param kind - forward-only or bound forward/backward Describe2.
  * @returns the combined prompt string.
  */
 export function buildKernelAgentPrompt(
@@ -48,8 +46,8 @@ export function buildKernelAgentPrompt(
   describe2: string,
   kind: DescribeKind = 'forward',
 ): string {
-  const describe2Heading = kind === 'backward'
-    ? '## Describe2 (class that implements backward for the operator)'
+  const describe2Heading = kind === 'forward_backward'
+    ? '## Describe2 (one bound operator implementation with forward and derived backward)'
     : '## Describe2 (nn.Module class whose forward contains the Describe1 formula)'
   return [
     '## Describe1 (operator formula / dialog)',
@@ -62,24 +60,11 @@ export function buildKernelAgentPrompt(
 
 /**
  * Store a prepared prompt for a session, replacing any previous one.
- * Forward Describe2 is also retained for a later backward describe.
  * @param sessionId - owning session id.
  * @param prepared - prompt payload.
  */
 export function setPreparedPrompt(sessionId: string, prepared: PreparedKernelAgentPrompt): void {
   store.set(sessionId, prepared)
-  if (prepared.kind === 'forward') {
-    lastForwardDescribe2.set(sessionId, prepared.describe2)
-  }
-}
-
-/**
- * Read the last successful forward Describe2 for a session.
- * @param sessionId - owning session id.
- * @returns forward class source, or undefined when absent.
- */
-export function getLastForwardDescribe2(sessionId: string): string | undefined {
-  return lastForwardDescribe2.get(sessionId)
 }
 
 /**
@@ -93,7 +78,6 @@ export function peekPreparedPrompt(sessionId: string): PreparedKernelAgentPrompt
 
 /**
  * Take and remove the prepared prompt for a session.
- * Does not clear the retained forward Describe2.
  * @param sessionId - owning session id.
  * @returns the prepared payload, or undefined when absent.
  */
@@ -115,5 +99,4 @@ export function clearPreparedPrompt(sessionId: string): void {
 /** Test-only: empty the store. */
 export function resetPreparedPromptStore(): void {
   store.clear()
-  lastForwardDescribe2.clear()
 }

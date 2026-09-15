@@ -80,7 +80,7 @@ export function apply(ctx: Context) {
 Modes: generate | fuse | optimize | run_example. In generate mode, the saved autoOptimize setting automatically runs performance optimization after correctness verification; do not issue a second optimize call for that workflow. Report optimization_status and optimization_error when returned.
 ${exampleList}
 When the user asks to run an example, map their natural-language description to the closest example name above and call run_example with that exact example_name. If the user names an example that is not in the list, report the available examples and ask them to pick one.
-For generate, fuse, or optimize: call kernelagent_describe first; those modes refuse to run without its prepared prompt, and problem_code is taken from that prompt (do not invent one). After a successful forward run, if the user also asked for a reverse/backward operator, call kernelagent_describe again with kind=backward, then call kernelagent again.
+For generate, fuse, or optimize: call kernelagent_describe first; those modes refuse to run without its prepared prompt, and problem_code is taken from that prompt (do not invent one). If the user requests backward or gradients, call kernelagent_describe once with kind=forward_backward and kernelagent once. That single generation binds and verifies both directions, then automatic optimization tunes forward and backward separately; never issue separate forward and backward kernelagent calls.
 Call the tool immediately without an announcement or progress preamble. After a successful call, always provide a short final answer in the user's language (2-4 sentences): summarize the requested operator and target platform, report the actual generation and correctness-verification outcome, and mention that the source files can be downloaded from the KernelAgent card above. Include optimization rounds, performance measurements, or MCU bottleneck and SOL utilization only when returned by the tool. Tool success alone is not evidence that correctness verification passed or performance improved; if verification details are absent, say they were not reported. When no optimization was performed (including automatic optimization), summarize correctness only and do not mention missing benchmarks or performance. After explicit or automatic optimization, include the returned optimization timings and speedup, clearly distinguishing the initial-kernel baseline from the PyTorch baseline. Do not run additional benchmarks for the summary. On failure, briefly explain the returned error and any actionable next step supported by it.
 KernelAgent settings are authoritative. Do not override model, workers, rounds, platform, backend, strategy, reasoning effort, verification, or experience memory when settings are available.
 The KernelAgent tool card displays available generated source files and per-file download buttons. Do not reproduce the report or source code in your reply. The card opens itself; do not tell the user to expand it. The final answer must contain a useful result summary, not just internal reasoning or a statement that the tool succeeded.`,
@@ -156,16 +156,33 @@ The KernelAgent tool card displays available generated source files and per-file
       },
       render: (args, value: any) => {
         const lines: string[] = []
+        const directional = value.directional_optimizations as Record<string, any> | undefined
         lines.push(`KernelAgent ${value.success ? '✅ succeeded' : '❌ failed'}`)
         if (value.verification_status) lines.push(`Correctness verification: ${value.verification_status}`)
         if (value.optimization_status) lines.push(`Optimization: ${value.optimization_status}`)
         if (value.optimization_error) lines.push(`Optimization error (verified generated kernel retained): ${value.optimization_error}`)
-        if (value.total_rounds != null) lines.push(`Optimization rounds: ${value.total_rounds}`)
+        if (directional) {
+          for (const direction of ['forward', 'backward']) {
+            const result = directional[direction]
+            if (!result) continue
+            const label = direction === 'forward' ? 'Forward' : 'Backward'
+            lines.push(`${label} optimization: ${result.success ? 'completed' : 'failed'}`)
+            if (result.total_rounds != null) lines.push(`${label} optimization rounds: ${result.total_rounds}`)
+            if (Number.isFinite(result.initial_time_ms) && result.initial_time_ms > 0 && Number.isFinite(result.best_time_ms) && result.best_time_ms > 0) {
+              lines.push(`${label} perf: ${result.initial_time_ms.toFixed(3)}ms → ${result.best_time_ms.toFixed(3)}ms`)
+              lines.push(`${label} speedup: ${(result.initial_time_ms / result.best_time_ms).toFixed(3)}x`)
+            }
+            if (result.bottleneck) lines.push(`${label} MCU bottleneck: ${result.bottleneck}`)
+            if (Number.isFinite(result.compute_sol_pct) && Number.isFinite(result.memory_sol_pct)) {
+              lines.push(`${label} MCU utilization: Compute SOL ${result.compute_sol_pct.toFixed(1)}%, Memory SOL ${result.memory_sol_pct.toFixed(1)}%`)
+            }
+          }
+        } else if (value.total_rounds != null) lines.push(`Optimization rounds: ${value.total_rounds}`)
         if (value.rounds != null) lines.push(`Generation rounds: ${value.rounds}`)
         if (value.kernel_path) lines.push(`Kernel: ${value.kernel_path}`)
         if (value.session_dir) lines.push(`Session: ${value.session_dir}`)
         if (value.artifacts_dir) lines.push(`Artifacts: ${value.artifacts_dir}`)
-        if ((args.mode === 'optimize' || value.optimization_status === 'completed') && Number.isFinite(value.initial_time_ms) && value.initial_time_ms > 0
+        if (!directional && (args.mode === 'optimize' || value.optimization_status === 'completed') && Number.isFinite(value.initial_time_ms) && value.initial_time_ms > 0
           && Number.isFinite(value.best_time_ms) && value.best_time_ms > 0) {
           lines.push(`Perf: ${value.initial_time_ms.toFixed(3)}ms → ${value.best_time_ms.toFixed(3)}ms`)
           lines.push(`Speedup vs initial kernel: ${(value.initial_time_ms / value.best_time_ms).toFixed(3)}x (below 1 means slower)`)
@@ -174,10 +191,10 @@ The KernelAgent tool card displays available generated source files and per-file
           }
           if (value.improvement_pct != null) lines.push(`Improvement: ${value.improvement_pct.toFixed(1)}%`)
         }
-        if (typeof value.bottleneck === 'string' && value.bottleneck !== '') {
+        if (!directional && typeof value.bottleneck === 'string' && value.bottleneck !== '') {
           lines.push(`MCU bottleneck: ${value.bottleneck}`)
         }
-        if (Number.isFinite(value.compute_sol_pct) && Number.isFinite(value.memory_sol_pct)) {
+        if (!directional && Number.isFinite(value.compute_sol_pct) && Number.isFinite(value.memory_sol_pct)) {
           lines.push(`MCU utilization: Compute SOL ${value.compute_sol_pct.toFixed(1)}%, Memory SOL ${value.memory_sol_pct.toFixed(1)}%`)
         }
         if (value.message) lines.push(`Message: ${value.message}`)
@@ -192,11 +209,18 @@ The KernelAgent tool card displays available generated source files and per-file
           : typeof sourceFiles === 'string' && sourceFiles !== ''
             ? [[typeof value.kernel_path === 'string' ? value.kernel_path.split(/[\\/]/).pop() || 'kernel.py' : 'kernel.py', sourceFiles]]
             : []
-        const timings = [
-          { label: 'PyTorch', value: value.pytorch_baseline_ms },
-          { label: 'Initial', value: value.initial_time_ms },
-          { label: 'Best', value: value.best_time_ms },
-        ].filter(item => typeof item.value === 'number' && Number.isFinite(item.value) && item.value > 0)
+        const directional = value.directional_optimizations as Record<string, any> | undefined
+        const timings = (directional
+          ? ['forward', 'backward'].flatMap((direction) => {
+              const result = directional[direction]
+              const label = direction === 'forward' ? 'Forward' : 'Backward'
+              return result ? [
+                { label: `${label} initial`, value: result.initial_time_ms },
+                { label: `${label} best`, value: result.best_time_ms },
+              ] : []
+            })
+          : [{ label: 'PyTorch', value: value.pytorch_baseline_ms }, { label: 'Initial', value: value.initial_time_ms }, { label: 'Best', value: value.best_time_ms }])
+          .filter(item => typeof item.value === 'number' && Number.isFinite(item.value) && item.value > 0)
         const chart = (args.mode === 'optimize' || value.optimization_status === 'completed') && timings.length >= 2
           ? JSON.stringify({ title: 'Kernel Performance', unit: 'ms', data: timings })
           : args.mode === 'run_example' && typeof value.perfchart_json === 'string' ? value.perfchart_json : undefined
@@ -214,6 +238,8 @@ The KernelAgent tool card displays available generated source files and per-file
       const apiKey = await resolveApiKey(ctx, globalConfig)
 
       let problemCode = args.problem_code || ''
+      let referenceCode: string | undefined
+      let describeKind: string | undefined
       if (requiresPreparedPrompt(args.mode)) {
         const agent = exec.agent
         if (!agent) throw new Error('kernelagent generate/fuse/optimize requires a live agent')
@@ -222,6 +248,8 @@ The KernelAgent tool card displays available generated source files and per-file
           throw new Error('Missing prepared describe prompt; call kernelagent_describe first')
         }
         problemCode = prepared.prompt
+        referenceCode = prepared.describe2
+        describeKind = prepared.kind
         console.log('[kernelagent-tool] ▶ using describe prompt:', {
           describe1Chars: prepared.describe1.length,
           describe2Chars: prepared.describe2.length,
@@ -238,6 +266,8 @@ The KernelAgent tool card displays available generated source files and per-file
 
       const payload: any = {
         problem_code: problemCode,
+        reference_code: referenceCode,
+        describe_kind: describeKind,
         initial_kernel: args.initial_kernel,
         test_code: args.test_code,
         options: {

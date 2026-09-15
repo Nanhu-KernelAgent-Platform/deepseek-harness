@@ -10,7 +10,7 @@ KernelAgent generation returns after correctness verification. The optimization 
 
 ## Decision
 
-The settings card exposes an opt-in automatic optimization switch and separate generation and optimization round budgets. The Python bridge sequences both stages in one tool call, carries generated tests into optimization, and renders native source bundles in the optimizer's input format. Successful results project optimized sources and actual timings; optimization failure retains the verified generated output with an explicit failure status.
+The settings card exposes an opt-in automatic optimization switch and separate generation and optimization round budgets. The Python bridge sequences both stages in one tool call, carries generated tests into optimization, and renders native source bundles in the optimizer's input format. A backward request produces one Describe2 containing the forward formula and its analytically derived backward, so one KernelAgent generation binds and verifies both directions; automatic optimization then tunes forward and backward sequentially with separate latency and MCU objectives. Successful results project optimized sources and actual timings; optimization failure retains the verified generated output with an explicit failure status.
 
 ## Alternatives considered
 

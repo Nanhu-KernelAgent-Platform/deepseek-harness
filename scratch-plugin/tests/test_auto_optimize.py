@@ -29,7 +29,7 @@ class AutoOptimizeTests(unittest.TestCase):
         patcher = patch.dict(sys.modules, modules)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.payload = {'problem_code': 'problem', 'test_code': 'test', 'options': {
+        self.payload = {'problem_code': 'problem', 'reference_code': "class Model: pass\ndef get_inputs(): return []", 'test_code': 'test', 'options': {
             'auto_optimize': True, 'generation_max_rounds': 3, 'max_rounds': 7,
         }}
 
@@ -101,6 +101,37 @@ class AutoOptimizeTests(unittest.TestCase):
         self.assertEqual(result['files'], best)
         self.assertEqual(result['optimization_status'], 'completed')
         self.assertNotIn('kernel_path', result)
+
+    def test_bound_operator_optimizes_forward_then_backward(self):
+        self.payload["describe_kind"] = "forward_backward"
+        self.payload["reference_code"] = "class Model: pass\ndef get_inputs(): return []"
+        forward = {"success": True, "kernel_code": "forward-best",
+                   "initial_time_ms": 4, "best_time_ms": 2}
+        backward = {"success": True, "kernel_code": "backward-best",
+                    "files": {"kernel.py": "final"},
+                    "initial_time_ms": 6, "best_time_ms": 3}
+        with patch.object(bridge, "run_optimize", side_effect=[forward, backward]) as optimize:
+            result = bridge.run_generate(self.payload)
+
+        self.assertEqual(optimize.call_count, 2)
+        forward_payload, backward_payload = [call.args[0] for call in optimize.call_args_list]
+        self.assertEqual(forward_payload["options"]["optimization_target"], "forward")
+        self.assertEqual(backward_payload["options"]["optimization_target"], "backward")
+        self.assertEqual(forward_payload["problem_code"], "class Model: pass\ndef get_inputs(): return []")
+        self.assertEqual(backward_payload["problem_code"], "class Model: pass\ndef get_inputs(): return []")
+        self.assertEqual(forward_payload["initial_kernel"], "BUNDLE:" + str(self.files))
+        self.assertEqual(backward_payload["initial_kernel"], "forward-best")
+        self.assertEqual(result["files"], {"kernel.py": "final"})
+        self.assertEqual(set(result["directional_optimizations"]), {"forward", "backward"})
+
+    def test_missing_get_inputs_stops_before_optimization(self):
+        self.payload["reference_code"] = "class Model: pass"
+        with patch.object(bridge, "run_optimize") as optimize:
+            result = bridge.run_generate(self.payload)
+        optimize.assert_not_called()
+        self.assertEqual(result["optimization_status"], "failed")
+        self.assertIn("get_inputs", result["optimization_error"])
+        self.assertNotIn("inf", result["optimization_error"].lower())
 
     def test_generated_tests_are_reused_without_user_supplied_test(self):
         with tempfile.TemporaryDirectory() as directory:

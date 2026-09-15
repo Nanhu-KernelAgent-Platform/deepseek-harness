@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-09-10-kernelagent-auto-optimization.md
-2026-09-10-kernelagent-auto-optimization.md: 8de78b4442c2902f5787d4784a2a688e2bed3ab2
-2026-09-10-kernelagent-auto-optimization.zh.md: 83c85cd1300f719bd080b2a5378ab3810863420e
+2026-09-10-kernelagent-auto-optimization.md: e1a6e9e6a639f34d72f53c424506a3b66929b391
+2026-09-10-kernelagent-auto-optimization.zh.md: 1086a17659a2a749a11d4b24fef0cea4b0795b88

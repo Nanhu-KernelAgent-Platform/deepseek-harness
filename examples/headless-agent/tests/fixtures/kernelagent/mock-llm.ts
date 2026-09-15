@@ -35,7 +35,7 @@ class CliMockAdapter extends LlmAdapter {
     }
     const toolResult = options.messages.at(-1)?.content.find(block => block.type === 'tool-result')
     if (toolResult === undefined) {
-      const args = JSON.stringify({ dialog: 'output = torch.relu(x)', kind: 'forward' })
+      const args = JSON.stringify({ dialog: 'output = torch.relu(x); derive backward', kind: 'forward_backward' })
       yield { type: 'block-start', index: 0, blockType: 'tool-call' }
       yield { type: 'tool-call-delta', index: 0, id: CallId('kernelagent-describe-call'), name: 'kernelagent_describe', argumentsDelta: args }
       yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId('kernelagent-describe-call'), name: 'kernelagent_describe', arguments: args } }
@@ -76,7 +76,13 @@ export function apply(ctx: Context): void {
   ctx.effect(() => {
     const originalFetch = globalThis.fetch
     globalThis.fetch = async () => new Response(JSON.stringify({
-      choices: [{ message: { content: 'import torch\n\nclass Model(torch.nn.Module):\n    def forward(self, x):\n        return torch.relu(x)' } }],
+      choices: [{ message: { content: `import torch\n\nclass ModelFunction(torch.autograd.Function):\n    @staticmethod\n    def forward(ctx, x):\n        ctx.save_for_backward(x)\n        return torch.relu(x)\n\n    @staticmethod\n    def backward(ctx, grad_output):\n        (x,) = ctx.saved_tensors\n        return grad_output * (x > 0)\n\nclass Model(torch.nn.Module):\n    def forward(self, x):\n        return ModelFunction.apply(x)
+
+def get_inputs():
+    return [torch.randn(4096, dtype=torch.float32)]
+
+def get_init_inputs():
+    return []` } }],
     }), { headers: { 'content-type': 'application/json' } })
     return () => { globalThis.fetch = originalFetch }
   }, 'kernelagent-describe.fetch-mock')
