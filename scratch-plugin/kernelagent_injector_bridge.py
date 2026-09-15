@@ -5,7 +5,7 @@ Deploys a KernelAgent best_bundle into the managed runtime store:
   - resolves the source (example name / run dir / best_bundle dir / single file
     / serialized "FILE: ..." payload, with a baseline_bundle fallback),
   - copies the bundle files (sha256-verified, never modified),
-  - builds the musa extension in isolation,
+  - builds the musa/cuda extension in isolation,
   - generates torch_integration.py (torch.ops.kernelagent::<op> registration),
   - records manifest.json with provenance + build status.
 
@@ -30,6 +30,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 # Bundle file conventions (see triton_kernel_agent/kernel_backend.py BACKENDS).
 MUSA_FILES = ("kernel.py", "binding.cpp", "kernel.mu", "setup.py")
@@ -47,7 +48,6 @@ class BridgeError(Exception):
 
 class TraceCollector:
     """Collects trace events during the inject flow.
-
     Events are emitted to stderr in real time and accumulated for L3 history.
     """
 
@@ -56,7 +56,6 @@ class TraceCollector:
 
     def add(self, step: str, detail: str) -> None:
         self.events.append({"step": step, "detail": detail})
-        # stderr real-time print
         print(f"[ka-injector] {step} {detail}", file=sys.stderr, flush=True)
 
     def to_list(self) -> list[dict]:
@@ -85,19 +84,70 @@ def detect_backend(bundle_dir: Path) -> str:
     )
 
 
-def derive_schema(kernel_py: Path, op: str) -> str:
-    """Batch-1 limitation: single Tensor-in / single Tensor-out signature."""
-    text = kernel_py.read_text(encoding="utf-8")
-    m = re.search(
-        r"def\s+kernel_function\s*\(\s*(\w+)\s*:\s*torch\.Tensor\s*\)\s*->\s*torch\.Tensor",
-        text,
-    )
-    if not m:
-        raise BridgeError(
-            f"batch-1 only supports 'def kernel_function(x: torch.Tensor) -> torch.Tensor' "
-            f"({kernel_py}); complex signatures will be handled in later batches"
-        )
-    return f"{op}(Tensor x) -> Tensor"
+def _is_cuda_backend(bundle_dir: Path, meta: dict) -> bool:
+    """Detect a CUDA-native extension bundle by meta.backend or setup.py CUDAExtension."""
+    if meta.get("backend") == "cuda":
+        return True
+    setup_py = bundle_dir / "setup.py"
+    if setup_py.is_file():
+        src = setup_py.read_text(encoding="utf-8")
+        if re.search(r"CUDAExtension", src):
+            return True
+    return False
+
+
+def derive_schema(kernel_py: Path, op: str, meta: "dict | None" = None) -> str:
+    """Derive the torch.library schema string for the kernel's forward entry.
+
+    fix: metadata.schema wins when present, otherwise we parse
+    kernel_function's AST (now supporting arbitrary argument lists, not just a
+    single Tensor argument).
+    """
+    if meta and meta.get("schema"):
+        return meta["schema"]
+    try:
+        tree = ast.parse(kernel_py.read_text(encoding="utf-8"))
+    except SyntaxError as e:
+        raise BridgeError(f"cannot parse kernel.py for schema: {e}")
+    fwd = _find_func_def(tree, "kernel_function")
+    if fwd is None:
+        raise BridgeError(f"kernel_function not found in {kernel_py}")
+    params = []
+    for a in fwd.args.args:
+        if a.arg in ("self", "cls"):
+            continue
+        params.append(f"{_annotation_to_schema(a.annotation)} {a.arg}")
+    ret = _annotation_to_schema(fwd.returns)
+    if not params:
+        raise BridgeError(f"kernel_function has no tensor params in {kernel_py}")
+    return f"{op}({', '.join(params)}) -> {ret}"
+
+
+def _derive_backward_schema(kernel_py: Path, op: str, meta: "dict | None" = None) -> str:
+    """Derive the torch.library schema string for a separate-style backward kernel.
+
+    Mirrors derive_schema but targets ``kernel_backward``. The generated op name is
+    ``<op>_bwd`` (e.g. ``relu_bwd``). Falls back to ``meta["backward_schema"]`` when
+    the bundle ships its own (no cross-file change to the generator needed).
+    """
+    if meta and meta.get("backward_schema"):
+        return meta["backward_schema"]
+    try:
+        tree = ast.parse(kernel_py.read_text(encoding="utf-8"))
+    except SyntaxError as e:
+        raise BridgeError(f"cannot parse kernel.py for backward schema: {e}")
+    bwd = _find_func_def(tree, "kernel_backward")
+    if bwd is None:
+        raise BridgeError(f"kernel_backward not found in {kernel_py} for separate style")
+    params = []
+    for a in bwd.args.args:
+        if a.arg in ("self", "cls"):
+            continue
+        params.append(f"{_annotation_to_schema(a.annotation)} {a.arg}")
+    ret = _annotation_to_schema(bwd.returns)
+    if not params:
+        raise BridgeError(f"kernel_backward has no tensor params in {kernel_py}")
+    return f"{op}_bwd({', '.join(params)}) -> {ret}"
 
 
 def parse_ext_name(setup_py: Path) -> str | None:
@@ -176,6 +226,221 @@ def check_op_target_consistency(op: str, target: str | None) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Solution-A metadata synthesis & read helpers (bottleneck-1 fix)
+#
+# Metadata is the contract between a KernelAgent-generated bundle and the
+# injector. When a bundle ships its own metadata.json we use it verbatim;
+# otherwise we synthesise an equivalent metadata dict from the existing bundle
+# files (setup.py / kernel.py / binding.cpp). This keeps the injector decoupled
+# from any KernelAgent code change.
+# --------------------------------------------------------------------------- #
+
+_AUTOGRAD_BASE_ATTR = "Function"  # name of torch.autograd.Function base class
+
+# Modules whose import lines must not be treated as a "compiled extension" when
+# cross-checking the kernel's extension import against metadata.
+_CROSSCHECK_IGNORE_MODULES = frozenset({
+    "torch", "torch.nn", "torch.nn.functional", "os", "sys", "math", "numpy", "np",
+})
+
+
+def _find_func_def(tree: ast.AST, name: str) -> "ast.FunctionDef | None":
+    """Return the FunctionDef named `name`, or None."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    return None
+
+
+def _find_autograd_subclass(tree: ast.AST) -> "str | None":
+    """Return the name of a torch.autograd.Function subclass, or None."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                if (isinstance(base, ast.Attribute) and base.attr == _AUTOGRAD_BASE_ATTR) or \
+                   (isinstance(base, ast.Name) and base.id == _AUTOGRAD_BASE_ATTR):
+                    return node.name
+    return None
+
+
+def _annotation_to_schema(ann: "ast.AST | None") -> str:
+    """Map a Python annotation to a torch.library schema type string.
+
+    Supports Tensor / scalar base types plus Optional[X] / Tuple[X, Y] /
+    List[X]. Used by both derive_schema (multi-arg) and metadata synthesis.
+    """
+    if ann is None:
+        return "Any"
+    if isinstance(ann, ast.Attribute):
+        if ann.attr == "Tensor":
+            return "Tensor"
+        # typing.Optional[...] value recursion; other attrs fall back to name
+        return _annotation_to_schema(ann.value) if ann.attr == "Optional" else ann.attr
+    if isinstance(ann, ast.Name):
+        return {"int": "int", "float": "float", "bool": "bool", "Tensor": "Tensor"}.get(ann.id, "Any")
+    if isinstance(ann, ast.Subscript):  # Optional[X] / Tuple[X, Y] / List[X] / Tensor?
+        if isinstance(ann.value, (ast.Attribute, ast.Name)):
+            base = ann.value.attr if isinstance(ann.value, ast.Attribute) else ann.value.id
+            if base == "Optional":
+                return _annotation_to_schema(ann.slice) + "?"
+            if base == "List":
+                return _annotation_to_schema(ann.slice)
+            if base == "Tuple":
+                elems = ann.slice.elts if isinstance(ann.slice, ast.Tuple) else [ann.slice]
+                return "(" + ", ".join(_annotation_to_schema(e) for e in elems) + ")"
+        return _annotation_to_schema(ann.value)
+    return "Any"
+
+
+def _read_op_from_side_info(run_dir: Path) -> "str | None":
+    """Best-effort op-name discovery from KernelAgent side-info files.
+
+    Priority: demo_summary.json (semantic_type) > problem.txt heuristic.
+    Returns a lowercase op name or None.
+    """
+    cand = run_dir / "demo_summary.json"
+    if cand.is_file():
+        try:
+            st = json.loads(cand.read_text(encoding="utf-8")).get("experience", {}).get("semantic_type")
+            if st:
+                return str(st)
+        except Exception:
+            pass
+    prob = run_dir / "problem.txt"
+    if prob.is_file():
+        try:
+            txt = prob.read_text(encoding="utf-8")
+            m = re.search(r"(?:op|operator|relu|sigmoid|silu)\b[^\n]*", txt, re.I)
+            hit = re.search(r"\b(relu|sigmoid|silu)\b", m.group(0), re.I) if m else None
+            if hit:
+                return hit.group(0).lower()
+        except Exception:
+            pass
+    return None
+
+
+def _synthesize_metadata_from_existing(bundle_dir: Path, run_dir: "Path | None") -> "dict | None":
+    """Synthesise a metadata dict from the bundle's real files.
+
+    Reads setup.py (extension name + backend), kernel.py (AST: forward entry and
+    backward style), and binding.cpp (C++ symbols + device/dtype guards).
+    Returns None when the bundle lacks the required kernel.py / setup.py.
+    """
+    kernel_py = bundle_dir / "kernel.py"
+    setup_py = bundle_dir / "setup.py"
+    binding_cpp = bundle_dir / "binding.cpp"
+    if not (kernel_py.is_file() and setup_py.is_file()):
+        return None
+
+    meta: dict = {"version": "2"}
+
+    setup_src = setup_py.read_text(encoding="utf-8")
+    m_name = re.search(r'name\s*=\s*["\']([^"\']+)["\']', setup_src)
+    if m_name:
+        meta["extension_module"] = m_name.group(1)
+    m_ext = re.search(r"(MUSAExtension|CUDAExtension|CppExtension|HIPExtension)", setup_src)
+    if m_ext:
+        meta["backend"] = {
+            "MUSAExtension": "musa", "CUDAExtension": "cuda",
+            "CppExtension": "cpu", "HIPExtension": "hip",
+        }[m_ext.group(1)]
+
+    tree = ast.parse(kernel_py.read_text(encoding="utf-8"))
+    if _find_func_def(tree, "kernel_function") is None:
+        return None
+    meta["kernel_module"] = "kernel"
+    meta["forward_entry"] = "kernel_function"
+
+    autograd_cls = _find_autograd_subclass(tree)
+    if autograd_cls:
+        meta["backward_mode"] = "kernel"
+        meta["backward_style"] = "autograd_function"
+        meta["backward_entry"] = autograd_cls
+        # Compatibility: an explicit kernel_backward function implies the
+        # "separate" style (forward/backward registered as two distinct ops).
+        if _find_func_def(tree, "kernel_backward") is not None:
+            meta["backward_style"] = "separate"
+            meta["backward_entry"] = "kernel_backward"
+    else:
+        meta["backward_mode"] = "eager"
+
+    if binding_cpp.is_file():
+        csrc = binding_cpp.read_text(encoding="utf-8")
+        defs = re.findall(r'm\.def\(\s*["\']([^"\']+)["\']', csrc)
+        if defs:
+            meta["forward_symbol"] = next((d for d in defs if "forward" in d), defs[0])
+            meta["backward_symbol"] = next((d for d in defs if "backward" in d), defs[-1])
+        if "is_musa()" in csrc:
+            meta["device"] = "musa"
+        elif "is_cuda()" in csrc:
+            meta["device"] = "cuda"
+        if "kFloat" in csrc:
+            meta["dtype"] = ["float32"]
+        elif "kHalf" in csrc:
+            meta["dtype"] = ["float16"]
+
+    op = _read_op_from_side_info(run_dir or bundle_dir.parent)
+    if op:
+        meta["op"] = op
+    return meta
+
+
+def _read_metadata(bundle_dir: Path, run_dir: "Path | None" = None) -> dict:
+    """Unified metadata entry point.
+
+    P1: bundle ships its own metadata.json -> use it verbatim.
+    P2: otherwise synthesise from existing files.
+    P3: empty shell so downstream code can fall back field-by-field.
+    """
+    bundled = bundle_dir / "metadata.json"
+    if bundled.is_file():
+        try:
+            return json.loads(bundled.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    synth = _synthesize_metadata_from_existing(bundle_dir, run_dir)
+    if synth is not None:
+        return synth
+    return {"version": "2"}
+
+
+def _cross_check_extension(meta: dict, kernel_py: Path, tc: "TraceCollector | None" = None) -> bool:
+    """A8/R3: extension imported by kernel.py must match meta.extension_module.
+
+    We scan *all* import statements (not just the first line) because kernel.py
+    typically imports `torch` before the compiled extension. On mismatch we
+    downgrade to eager mode (falls back to OP_FORMULAS) rather than silently
+    mis-registering the kernel.
+    """
+    if not kernel_py.is_file() or "extension_module" not in meta:
+        return True
+    src = kernel_py.read_text(encoding="utf-8")
+    # Collect every top-level imported module name ("import x" / "from x import").
+    found = re.findall(r"^\s*(?:import\s+([A-Za-z_][\w]*)|from\s+([A-Za-z_][\w]*)\s+import)", src, re.M)
+    imported_names = [a or b for a, b in found]
+    ext = meta["extension_module"]
+    if ext in imported_names:
+        if tc:
+            tc.add("meta.crosscheck", f"OK: kernel.py imports '{ext}' == metadata")
+        return True
+    # Extension not imported: only downgrade if a *different* extension is the
+    # one actually imported (a real mismatch). Standard libs (torch/os/sys/...)
+    # are ignored.
+    ext_candidates = [n for n in imported_names if n not in _CROSSCHECK_IGNORE_MODULES]
+    if ext_candidates:
+        msg = (f"cross-check FAIL: kernel.py imports '{ext_candidates[0]}' but metadata "
+               f"extension_module='{ext}'; downgrading to eager")
+        if tc:
+            tc.add("meta.crosscheck", msg)
+        meta["backward_mode"] = "eager"
+        meta["_crosscheck_warning"] = msg
+        return False
+    if tc:
+        tc.add("meta.crosscheck", f"OK: no conflicting extension import (expected '{ext}')")
+    return True
+
+
+# --------------------------------------------------------------------------- #
 # R6: Training script dynamic generation & injection
 # --------------------------------------------------------------------------- #
 
@@ -225,6 +490,8 @@ def analyze_train_script(script: Path, op: str) -> dict:
             "insert_after_line": N,
             "nn_module_used": bool,
             "inplace_warn": bool,
+            "tensor_method_used": bool,  # x.op() / self.op() call form (R6 D-R6-1)
+            "stateful_op": bool,        # batch/instance/layer norm -> keep native (R7 D-R7-1)
         }
     """
     text = script.read_text(encoding="utf-8")
@@ -234,7 +501,19 @@ def analyze_train_script(script: Path, op: str) -> dict:
     forms: list[tuple[str, str]] = []
     nn_module_used = False
     inplace_warn = False
+    tensor_method_used = False
+    stateful_op = False
     last_import_line = 0
+    # Stateful ops whose kernel is a pure function and cannot carry running
+    # stats/buffers; we keep them native instead of patching (R7 D-R7-1).
+    # Detection is scoped to the op being injected: a script that merely uses
+    # BatchNorm while we are patching relu must NOT be skipped.
+    _stateful_ops = {"batch_norm", "instance_norm", "layer_norm"}
+    _stateful_class_to_op = {
+        "BatchNorm1d": "batch_norm", "BatchNorm2d": "batch_norm", "BatchNorm3d": "batch_norm",
+        "InstanceNorm1d": "instance_norm", "InstanceNorm2d": "instance_norm", "InstanceNorm3d": "instance_norm",
+        "LayerNorm": "layer_norm",
+    }
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -262,13 +541,20 @@ def analyze_train_script(script: Path, op: str) -> dict:
                 nn_module_used = True
             # Detect functional call forms
             if isinstance(func, ast.Attribute) and func.attr == op:
-                if isinstance(func.value, ast.Name):
-                    alias = func.value.id
-                    if alias in aliases:
-                        forms.append((alias, op))
-                elif isinstance(func.value, ast.Attribute) and func.value.attr == "nn":
-                    # torch.nn.ReLU (but we only care about functional)
-                    pass
+                if isinstance(func.value, ast.Name) and func.value.id in aliases:
+                    forms.append((func.value.id, op))
+                else:
+                    # x.op() / self.op() / other carrier: a Tensor-method form
+                    # that needs the torch.Tensor.{op} monkeypatch (R6 D-R6-1).
+                    tensor_method_used = True
+            # Detect stateful ops (batch/instance/layer norm) -> keep native (R7 D-R7-1).
+            # Only when the op we are injecting is itself a stateful op.
+            if op in _stateful_ops:
+                if isinstance(func, ast.Attribute) and func.attr == op:
+                    stateful_op = True
+                elif isinstance(func, ast.Attribute) and func.attr in _stateful_class_to_op:
+                    if _stateful_class_to_op[func.attr] == op:
+                        stateful_op = True
             # Detect inplace=True kwarg
             for kw in node.keywords:
                 if kw.arg == "inplace" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
@@ -288,13 +574,122 @@ def analyze_train_script(script: Path, op: str) -> dict:
         "insert_after_line": last_import_line,
         "nn_module_used": nn_module_used,
         "inplace_warn": inplace_warn,
+        "tensor_method_used": tensor_method_used,
+        "stateful_op": stateful_op,
     }
+
+
+def _param_names_from_schema(schema: "str | None", fallback: list[str]) -> list[str]:
+    """Extract parameter names from a torch.library schema string.
+
+    Used by the eager scaffold so that multi-argument operators are patched
+    correctly (bottleneck-2 fix). Falls back to `fallback` when no schema.
+    """
+    if not schema:
+        return fallback
+    m = re.search(r"\(([^)]*)\)", schema)
+    if not m or not m.group(1).strip():
+        return fallback
+    names: list[str] = []
+    for part in m.group(1).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        names.append(part.split()[-1])  # "Tensor a" / "int k" -> "a" / "k"
+    return names or fallback
+
+
+def _get_backward_info(op: str, op_dir: "Path | None" = None, meta: "dict | None" = None) -> dict:
+    """Resolve backward-mode info for `op`.
+
+    Returns a dict with at least {"mode": ...}:
+      - mode="kernel", style=autograd_function: backward is embedded in the
+        registered forward entry (no extra scaffold needed).
+      - mode="kernel", style=separate: a distinct backward op must be wired.
+      - mode="eager": use the OP_FORMULAS formula as a fallback.
+
+    Raises BridgeError when no backward info can be found (A6: explicit, not silent).
+    """
+    if meta is None and op_dir is not None:
+        mp = op_dir / "_meta.json"
+        if mp.is_file():
+            try:
+                meta = json.loads(mp.read_text(encoding="utf-8"))
+            except Exception:
+                meta = None
+
+    if meta:
+        mode = meta.get("backward_mode")
+        if mode == "kernel":
+            return {
+                "mode": "kernel",
+                "style": meta.get("backward_style", "autograd_function"),
+                "forward_entry": meta.get("forward_entry", "kernel_function"),
+                "backward_entry": meta.get("backward_entry"),
+                "schema": meta.get("schema"),
+                "extension_module": meta.get("extension_module"),
+                "dtype": meta.get("dtype"),
+                "device": meta.get("device"),
+            }
+        if mode == "eager" or "backward" in meta:
+            return {"mode": "eager", **meta.get("backward", {})}
+
+    if op in OP_FORMULAS:
+        return {"mode": "eager", **OP_FORMULAS[op]}
+
+    raise BridgeError(
+        f"no backward info for op '{op}'; "
+        f"provide metadata.json(backward_mode=kernel) or extend OP_FORMULAS"
+    )
+
+
+def _scaffold_kwfilter_source(op: str, allowed: set[str]) -> str:
+    """Generate the ``_ka_kwfilter`` helper for the injected training scaffold.
+
+    R1a: module-delegated calls (e.g. ``nn.ReLU.forward`` -> ``F.relu(input,
+    inplace=False)``) pass kwargs the kernel op's schema does not declare. We drop
+    those kwargs (decision: discard + trace warning) so the routed call does not
+    raise TypeError, while still making the substitution observable on stderr.
+    """
+    return (
+        f"_KA_ALLOWED = {sorted(allowed)!r}\n"
+        f"\n"
+        f"def _ka_kwfilter(kw):\n"
+        f"    out = {{}}\n"
+        f"    for _k, _v in kw.items():\n"
+        f"        if _k in _KA_ALLOWED:\n"
+        f"            out[_k] = _v\n"
+        f"        else:\n"
+        f"            sys.stderr.write(\n"
+        f"                f\"[ka-inject] dropped unsupported kwarg '{{_k}}' for op '{op}'\\n\")\n"
+        f"    return out\n"
+    )
+
+
+def _normalize_list(v):
+    """Normalize a metadata dtype/device value into a list-literal string.
+
+    Accepts None (-> "[]" no guard), a single string ("float32"), or a
+    list (["float32","bf16"]); always returns a Python list-literal string so
+    it can be embedded verbatim in generated code (R9 dtype/device guard).
+    """
+    if v is None or v == "":
+        items: list = []
+    elif isinstance(v, str):
+        items = [v]
+    elif isinstance(v, (list, tuple)):
+        items = list(v)
+    else:
+        items = [str(v)]
+    return repr(items)
 
 
 def generate_injected_train_script(
     script: Path,
     op: str,
     trace: TraceCollector | None = None,
+    meta: "dict | None" = None,
+    schema: "str | None" = None,
 ) -> Path:
     """Generate <stem>_ka_injected.py by inserting a kernelagent-runtime scaffold.
 
@@ -303,12 +698,11 @@ def generate_injected_train_script(
     script automatically route to torch.ops.kernelagent.<op>.
     """
     tc = trace
-    if op not in OP_FORMULAS:
-        supported = ", ".join(sorted(OP_FORMULAS))
-        raise BridgeError(
-            f"op '{op}' not in OP_FORMULAS registry; supported: {supported}. "
-            f"Extend OP_FORMULAS or use a registered op."
-        )
+    # No longer require op in OP_FORMULAS; resolve backward info instead.
+    bwd = _get_backward_info(op, script.parent / "ops" / op, meta)
+    mode = bwd.get("mode")
+    if mode == "eager" and op not in OP_FORMULAS and "backward" not in bwd:
+        raise BridgeError(f"op '{op}' has no backward info (not in OP_FORMULAS, no metadata)")
 
     text = script.read_text(encoding="utf-8")
     analysis = analyze_train_script(script, op)
@@ -332,61 +726,172 @@ def generate_injected_train_script(
     if insert_line < 1 or insert_line > len(lines):
         insert_line = 0
 
-    # Build scaffold
-    formula = OP_FORMULAS[op]
-    save_vars = ", ".join(formula["save"])
     class_name = _generate_class_name(op, stripped)
-
-    # Module attribute patch lines (alias-proof)
-    patch_lines: list[str] = []
     aliases = analysis["aliases"]
-    if "F" in aliases:
-        patch_lines.append(f'_ka_F.{op} = lambda x, *a, **kw: {class_name}.apply(x)')
-    if "torch" in aliases:
-        patch_lines.append(f'_ka_torch.{op} = lambda x, *a, **kw: {class_name}.apply(x)')
-    if not patch_lines:
-        # Fallback: patch both common aliases even if AST didn't detect them
-        patch_lines = [
-            f'_ka_F.{op} = lambda x, *a, **kw: {class_name}.apply(x)',
-            f'_ka_torch.{op} = lambda x, *a, **kw: {class_name}.apply(x)',
-        ]
 
-    scaffold = (
-        f"{INJECTION_BLOCK_START}\n"
-        f"# op: {op} | replaces: torch.{op} / F.{op} (module-attribute patch, alias-proof)\n"
-        f"import atexit\n"
-        f"\n"
-        f"import kernelagent_runtime  # registers torch.ops.kernelagent.*\n"
-        f"import torch as _ka_torch\n"
-        f"import torch.nn.functional as _ka_F\n"
-        f"\n"
-        f'_KA_CALLS = {{"{op}": 0}}\n'
-        f"\n"
-        f"\n"
-        f"class {class_name}(torch.autograd.Function):\n"
-        f"    @staticmethod\n"
-        f"    def forward(ctx, x):\n"
-        f"        ctx.save_for_backward({save_vars})\n"
-        f"        _KA_CALLS['{op}'] += 1\n"
-        f"        return torch.ops.kernelagent.{op}(x)\n"
-        f"\n"
-        f"    @staticmethod\n"
-        f"    def backward(ctx, grad_out):\n"
-        f"        ({save_vars},) = ctx.saved_tensors\n"
-        f"        {formula['backward']}\n"
-        f"\n"
-        f"\n"
-        f'_KA_ORIG = {{"F.{op}": _ka_F.{op}, "torch.{op}": _ka_torch.{op}}}\n'
-        + "\n".join(patch_lines) + "\n"
-        f"\n"
-        f"\n"
-        f"def _ka_report():\n"
-        f"    print(f\"[ka-inject] {op} kernel calls = {{_KA_CALLS['{op}']}}\")\n"
-        f"\n"
-        f"\n"
-        f"atexit.register(_ka_report)\n"
-        f"{INJECTION_BLOCK_END}\n"
-    )
+    # R1a: build the kwarg filter once. Module-delegated calls (e.g.
+    # nn.ReLU.forward -> F.relu(input, inplace=False)) pass kwargs the kernel op
+    # rejects; the filter drops them and traces a warning (discard + trace).
+    _allowed = set(_param_names_from_schema(schema, ["x"])) | {"x", "input"}
+
+    stateful_op = analysis.get("stateful_op", False)
+    tensor_method_used = analysis.get("tensor_method_used", False)
+
+    # R6 (D-R6-1): route x.{op}() Tensor-method calls to the kernel via a
+    # torch.Tensor.{op} monkeypatch. Global side-effect, but covers every call
+    # form (x.op(), self.op(), callbacks) without any AST rewriting.
+    _r6_patch = ""
+    if tensor_method_used:
+        _r6_patch = (
+            f"\n"
+            f"# R6: route x.{op}() (Tensor method) to the kernel via monkeypatch.\n"
+            f"# Global side-effect on torch.Tensor.{op}; bypasses some C fast paths.\n"
+            f"torch.Tensor.{op} = staticmethod(_ka_{op}_wrap)\n"
+            f'sys.stderr.write(f"[ka-inject] routed torch.Tensor.{op}() to kernelagent\\n")\n'
+        )
+
+    # R7-2: surface inplace=True stripping to stderr. The kwarg is already
+    # dropped by _ka_kwfilter; this only makes the substitution observable.
+    _inplace_warn = ""
+    if analysis.get("inplace_warn"):
+        _inplace_warn = (
+            f'sys.stderr.write('
+            f'"[ka-inject] WARNING: inplace=True on op \'{op}\' is dropped by the kernel path\\n")\n'
+        )
+
+    if stateful_op:
+        # R7-1: stateful op (batch/instance/layer norm) -> keep native.
+        # The kernel is a pure function and cannot carry running stats/buffers,
+        # so we skip patching and warn instead of silently losing state.
+        scaffold = (
+            f"{INJECTION_BLOCK_START}\n"
+            f"# op: {op} | SKIPPED: stateful op kept native (kernel path skipped)\n"
+            f"import sys\n"
+            f'sys.stderr.write('
+            f'"[ka-inject] WARNING: stateful op \'{op}\' kept native; kernel path skipped\\n")\n'
+            f"{INJECTION_BLOCK_END}\n"
+        )
+    elif mode == "kernel":
+        style = bwd.get("style", "autograd_function")
+        if style == "separate":
+            # Mode 1b: separate style. The bundle ships the forward (kernel_function)
+            # and backward (kernel_backward) as TWO distinct kernels. torch_integration.py
+            # registers both ops and defines a bridge autograd.Function
+            # (kernelagent_runtime._KA_<op>_Fn) that "wires" them into one
+            # differentiable operator. We route the patched call through that bridge.
+            _call_expr = f"kernelagent_runtime._KA_{op}_Fn.apply(x, *a, **_ka_kwfilter(kw))"
+            _mode_comment = f"kernel(separate) | backward wired via kernelagent_runtime._KA_{op}_Fn"
+            _rt_note = " AND exposes _KA_{op}_Fn bridge"
+        else:
+            # Mode 1: autograd_function style. Backward is embedded inside the
+            # registered forward entry (an autograd.Function); patching the module
+            # attributes is sufficient, and the call routes straight to the op.
+            _call_expr = f"torch.ops.kernelagent.{op}(x, *a, **_ka_kwfilter(kw))"
+            _mode_comment = "kernel(autograd_function) | backward embedded; replaces torch.{op}/F.{op}"
+            _rt_note = ""
+        patch_lines = []
+        if "F" in aliases:
+            patch_lines.append(f'_ka_F.{op} = lambda x, *a, **kw: _ka_{op}_wrap(x, *a, **kw)')
+        if "torch" in aliases:
+            patch_lines.append(f'_ka_torch.{op} = lambda x, *a, **kw: _ka_{op}_wrap(x, *a, **kw)')
+        if not patch_lines:
+            patch_lines = [
+                f'_ka_F.{op} = lambda x, *a, **kw: _ka_{op}_wrap(x, *a, **kw)',
+                f'_ka_torch.{op} = lambda x, *a, **kw: _ka_{op}_wrap(x, *a, **kw)',
+            ]
+        scaffold = (
+            f"{INJECTION_BLOCK_START}\n"
+            f"# op: {op} | {_mode_comment}\n"
+            f"import sys\n"
+            f"import atexit\n"
+            f"import kernelagent_runtime  # registers torch.ops.kernelagent.*{_rt_note}\n"
+            f"import torch as _ka_torch\n"
+            f"import torch.nn.functional as _ka_F\n"
+            f'_KA_CALLS = {{"{op}": 0}}\n'
+            f"\n"
+            + _scaffold_kwfilter_source(op, _allowed) +
+            f"\n"
+            f"def _ka_{op}_wrap(x, *a, **kw):\n"
+            f"    _KA_CALLS['{op}'] += 1\n"
+            f"    return {_call_expr}\n"
+            + _r6_patch +
+            f"\n"
+            f"_KA_ORIG = {{'F.{op}': _ka_F.{op}, 'torch.{op}': _ka_torch.{op}}}\n"
+            + "\n".join(patch_lines) + "\n"
+            f"\n"
+            f"def _ka_report():\n"
+            f"    print(f\"[ka-inject] {op} kernel calls = {{_KA_CALLS['{op}']}}\")\n"
+            f"atexit.register(_ka_report)\n"
+            f"{INJECTION_BLOCK_END}\n"
+        )
+    else:
+        # Mode 2: eager (old bundle op in OP_FORMULAS or explicit backward dict).
+        formula = bwd if "backward" in bwd else OP_FORMULAS[op]
+        # Bottleneck-2 fix: derive parameter names from schema for N-arg ops;
+        # single-arg stays identical to the legacy scaffold (A5 regression).
+        param_names = _param_names_from_schema(
+            meta.get("schema") if meta else None, formula.get("save", ["x"])
+        )
+        multi = len(param_names) > 1
+        save_stmt = "ctx.save_for_backward(*args)" if multi else f"ctx.save_for_backward({param_names[0]})"
+        forward_arg = "*args" if multi else param_names[0]
+        call_args = "*args" if multi else param_names[0]
+        unpack = (", ".join(param_names) + " = ctx.saved_tensors") if multi else f"{param_names[0]}, = ctx.saved_tensors"
+
+        patch_lines = []
+        if "F" in aliases:
+            patch_lines.append(f'_ka_F.{op} = lambda *args, **kw: {class_name}.apply(*args, **_ka_kwfilter(kw))')
+        if "torch" in aliases:
+            patch_lines.append(f'_ka_torch.{op} = lambda *args, **kw: {class_name}.apply(*args, **_ka_kwfilter(kw))')
+        if not patch_lines:
+            patch_lines = [
+                f'_ka_F.{op} = lambda *args, **kw: {class_name}.apply(*args, **_ka_kwfilter(kw))',
+                f'_ka_torch.{op} = lambda *args, **kw: {class_name}.apply(*args, **_ka_kwfilter(kw))',
+            ]
+        scaffold = (
+            f"{INJECTION_BLOCK_START}\n"
+            f"# op: {op} | mode: eager | params={param_names}\n"
+            f"import sys\n"
+            f"import atexit\n"
+            f"\n"
+            f"import kernelagent_runtime\n"
+            f"import torch as _ka_torch\n"
+            f"import torch.nn.functional as _ka_F\n"
+            + _scaffold_kwfilter_source(op, _allowed) +
+            f"\n"
+            + _inplace_warn +
+            f'_KA_CALLS = {{"{op}": 0}}\n'
+            f"\n"
+            f"\n"
+            f"def _ka_{op}_wrap(*a, **kw):\n"
+            f"    _KA_CALLS['{op}'] += 1\n"
+            f"    return {class_name}.apply(*a, **_ka_kwfilter(kw))\n"
+            + _r6_patch +
+            f"\n"
+            f"class {class_name}(torch.autograd.Function):\n"
+            f"    @staticmethod\n"
+            f"    def forward(ctx, {forward_arg}):\n"
+            f"        {save_stmt}\n"
+            f"        _KA_CALLS['{op}'] += 1\n"
+            f"        return torch.ops.kernelagent.{op}({call_args})\n"
+            f"\n"
+            f"    @staticmethod\n"
+            f"    def backward(ctx, grad_out):\n"
+            f"        {unpack}\n"
+            f"        {formula['backward']}\n"
+            f"\n"
+            f"\n"
+            f'_KA_ORIG = {{"F.{op}": _ka_F.{op}, "torch.{op}": _ka_torch.{op}}}\n'
+            + "\n".join(patch_lines) + "\n"
+            f"\n"
+            f"\n"
+            f"def _ka_report():\n"
+            f"    print(f\"[ka-inject] {op} kernel calls = {{_KA_CALLS['{op}']}}\")\n"
+            f"\n"
+            f"\n"
+            f"atexit.register(_ka_report)\n"
+            f"{INJECTION_BLOCK_END}\n"
+        )
 
     # Insert scaffold
     new_lines = lines[:insert_line] + ["\n", scaffold, "\n"] + lines[insert_line:]
@@ -397,7 +902,9 @@ def generate_injected_train_script(
     if tc:
         tc.add("traingen.analyze",
                f"aliases={aliases} forms={analysis['forms']} insert_after_line={insert_line} "
-               f"nn_module_used={analysis['nn_module_used']} inplace_warn={analysis['inplace_warn']}")
+               f"nn_module_used={analysis['nn_module_used']} inplace_warn={analysis['inplace_warn']} "
+               f"tensor_method_used={analysis.get('tensor_method_used', False)} "
+               f"stateful_op={analysis.get('stateful_op', False)}")
         tc.add("traingen.write",
                f"generated {injected_path} (scaffold {scaffold.count(chr(10))} lines, "
                f"class={class_name})")
@@ -431,6 +938,75 @@ def _read_status(run_dir: Path) -> str:
     except json.JSONDecodeError:
         return "UNKNOWN"
     return str(summary.get("status", "UNKNOWN")).upper()
+
+
+# A bundle directory the caller points at directly is NOT automatically an
+# unoptimized baseline. Only sources that are literally named/declared as
+# baselines keep kind="baseline"; everything else is kind="local" and its
+# status is read from its own provenance metadata instead of being assumed.
+BASELINE_DIR_NAMES = ("baseline_bundle",)
+
+PROVENANCE_FILES = ("demo_summary.json", "result.json", "_meta.json", "_provenance.json")
+
+
+def _load_json_file(path: Path) -> Any | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _status_of(data: Any) -> str:
+    """Extract a status string from a provenance document."""
+    if not isinstance(data, dict):
+        return ""
+    status = str(data.get("status", "")).upper()
+    if status:
+        return status
+    if data.get("success") is True:
+        return "SUCCESS"
+    if data.get("success") is False:
+        return "FAILED"
+    return ""
+
+
+def _read_local_status(d: Path) -> str:
+    """Status for a caller-supplied bundle, read from real provenance metadata.
+
+    Looks at the bundle directory and its parent; a provenance file may point
+    (via "result_json"/"result_path") at the original generation result, which
+    is then followed so the status comes from the real artifact.
+    """
+    for base in (d, d.parent):
+        if base is None:
+            continue
+        for name in PROVENANCE_FILES:
+            f = base / name
+            if not f.is_file():
+                continue
+            data = _load_json_file(f)
+            if data is None:
+                continue
+            if isinstance(data, dict):
+                for key in ("result_json", "result_path"):
+                    ptr = data.get(key)
+                    if isinstance(ptr, str) and Path(ptr).is_file():
+                        status = _status_of(_load_json_file(Path(ptr)))
+                        if status:
+                            return status
+            status = _status_of(data)
+            if status:
+                return status
+    return "UNKNOWN"
+
+
+def classify_bundle(d: Path, run_layout: bool) -> tuple[str, str]:
+    """Classify a bundle by provenance instead of by its parent directory name."""
+    if run_layout:
+        return "run", _read_status(d.parent)
+    if d.name in BASELINE_DIR_NAMES or (d / "BASELINE").is_file():
+        return "baseline", "BASELINE"
+    return "local", _read_local_status(d)
 
 
 def _is_bundle_dir(d: Path) -> bool:
@@ -555,7 +1131,7 @@ def resolve_source(
             }
         # best_bundle directory or a dir containing best_bundle/
         if d.name == "best_bundle" and _is_bundle_dir(d):
-            kind = "run" if d.parent.name.startswith("run_") else "baseline"
+            kind, status = classify_bundle(d, d.parent.name.startswith("run_"))
             tc.add("source.resolved",
                    f"best_bundle_dir={d}, kind={kind}")
             return {
@@ -564,31 +1140,35 @@ def resolve_source(
                 "run_dir": str(d.parent),
                 "best_bundle_dir": str(d),
                 "backend": detect_backend(d),
-                "status": _read_status(d.parent) if d.parent.name.startswith("run_") else "BASELINE",
+                "status": status,
                 "problem_py": _find_problem_py(d.parent.parent, d.parent),
             }
         if (d / "best_bundle").is_dir() and _is_bundle_dir(d / "best_bundle"):
             bundle_dir = d / "best_bundle"
+            kind, status = classify_bundle(bundle_dir, d.name.startswith("run_"))
             tc.add("source.resolved",
-                   f"dir_with_best_bundle={d}, kind=run")
+                   f"dir_with_best_bundle={d}, kind={kind}")
             return {
-                "kind": "run",
+                "kind": kind,
                 "example": "",
                 "run_dir": str(d),
                 "best_bundle_dir": str(bundle_dir),
                 "backend": detect_backend(bundle_dir),
-                "status": _read_status(d),
+                "status": status,
                 "problem_py": _find_problem_py(d.parent, d),
             }
-        # bare bundle dir (e.g. baseline_bundle referenced directly)
+        # bare bundle dir (only literally-named baselines are treated as baselines)
         if _is_bundle_dir(d):
+            kind, status = classify_bundle(d, False)
+            tc.add("source.resolved",
+                   f"bare_bundle_dir={d}, kind={kind}")
             return {
-                "kind": "baseline",
+                "kind": kind,
                 "example": "",
                 "run_dir": "",
                 "best_bundle_dir": str(d),
                 "backend": detect_backend(d),
-                "status": "BASELINE",
+                "status": status,
                 "problem_py": _find_problem_py(d.parent, None),
             }
         # Fuser artifacts dir (composed kernel) -- not supported in batch-1
@@ -722,6 +1302,18 @@ def enable(ops: list[str] | None = None) -> list[str]:
         mod = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = mod
         spec.loader.exec_module(mod)
+        # Re-export any generated bridge Functions (e.g. _KA_relu_Fn) onto the
+        # kernelagent_runtime package so training scaffolds can call
+        # kernelagent_runtime._KA_<op>_Fn.apply(...) directly. The integration
+        # template defines these classes; enable() makes them package-visible.
+        _pkg = sys.modules.get("kernelagent_runtime")
+        if _pkg is not None:
+            for _attr in dir(mod):
+                if _attr.startswith("_KA_"):
+                    try:
+                        setattr(_pkg, _attr, getattr(mod, _attr))
+                    except AttributeError:
+                        pass
         loaded.append(op)
     return loaded
 
@@ -771,7 +1363,47 @@ import torch
 
 _OP = "{op}"
 _DISPATCH_KEY = "{dispatch_key}"
+_FORWARD_ENTRY = "{forward_entry}"  # Solution-A: forward entry from metadata (default kernel_function)
+_BACKWARD_STYLE = "{backward_style}"  # "autograd_function" | "separate"
+_BACKWARD_OP = "{backward_op}"        # separate style only: the distinct backward op name
+_BACKWARD_ENTRY = "{backward_entry}"  # separate style only: backward kernel function name
+_BACKWARD_SCHEMA = "{backward_schema}"  # separate style only: torch.library schema for the backward op
 _HERE = os.path.dirname(os.path.abspath(__file__))
+
+# R9: dtype/device guard. The allowed sets are supplied by the operator's
+# metadata (e.g. dtype=["float32","bf16"], device=["musa","cuda"]) and may be
+# multi-valued; an empty list means "no guard" (fail-open) so we never silently
+# reject a dtype/device the kernel actually supports.
+_DTYPE_ALLOW = {dtype}        # list[str]; [] -> no guard
+_DEVICE_ALLOW = {device}      # list[str]; [] -> no guard
+_DTYPE_ALIASES = {{"bf16": "bfloat16", "fp16": "float16", "fp32": "float32"}}
+
+
+def _ka_dtype_ok(dt):
+    if not _DTYPE_ALLOW:
+        return True
+    _name = str(dt).replace("torch.", "")
+    for _d in _DTYPE_ALLOW:
+        _canon = _DTYPE_ALIASES.get(_d, _d)
+        try:
+            if dt == getattr(torch, _canon):
+                return True
+        except AttributeError:
+            if _name == _canon:
+                return True
+    return False
+
+
+def _guarded_forward(*args, **kwargs):
+    _t = next((_a for _a in args if isinstance(_a, torch.Tensor)), None)
+    if _t is not None:
+        if not _ka_dtype_ok(_t.dtype):
+            raise RuntimeError(
+                f"[ka] {{_OP}} expects dtype {{_DTYPE_ALLOW}}, got {{_t.dtype}}")
+        if _DEVICE_ALLOW and str(_t.device.type) not in _DEVICE_ALLOW:
+            raise RuntimeError(
+                f"[ka] {{_OP}} expects device {{_DEVICE_ALLOW}}, got {{_t.device.type}}")
+    return forward_fn(*args, **kwargs)
 
 
 def _load_module(name: str, path: str):
@@ -782,13 +1414,14 @@ def _load_module(name: str, path: str):
     return mod
 
 
-# kernel.py imports the locally built extension (e.g. "import _relu_musa");
+# kernel.py imports the locally built extension (e.g. "import relu_musa_ext");
 # make ops/<op>/ (which contains the .so) importable first.
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 _kernel_mod = _load_module(f"kernelagent_ops_{{_OP}}_kernel", os.path.join(_HERE, "kernel.py"))
-kernel_function = _kernel_mod.kernel_function
+forward_fn = getattr(_kernel_mod, _FORWARD_ENTRY)
+
 
 def _already_registered(name: str) -> bool:
     try:
@@ -796,13 +1429,50 @@ def _already_registered(name: str) -> bool:
     except AttributeError:
         return False
 
+
 if not _already_registered(_OP):
     try:
         _lib = torch.library.Library("kernelagent", "DEF")
     except RuntimeError:
         _lib = torch.library.Library("kernelagent", "FRAGMENT")
     _lib.define("{schema}")
-    _lib.impl(_OP, kernel_function, _DISPATCH_KEY)
+    # R9: wrap forward_fn in a dtype/device guard. The allowed sets come from the
+    # operator's metadata; an empty set means no guard (fail-open).
+    _lib.impl(_OP, _guarded_forward, _DISPATCH_KEY)
+
+# --- backward wiring -------------------------------------------------------
+# autograd_function: the backward is EMBEDDED inside the forward entry's
+#   torch.autograd.Function, so registering the forward op alone (above) is
+#   sufficient and nothing more is needed here.
+# separate: the bundle ships the backward as a SEPARATE kernel (kernel_backward).
+#   We register a second op (<OP>_bwd) and a bridge autograd.Function
+#   (_KA_<OP>_Fn) that calls the forward op in forward() and the backward op in
+#   backward(), "wiring" the two kernels into one differentiable operator.
+if _BACKWARD_STYLE == "separate":
+    if not _already_registered(_BACKWARD_OP):
+        try:
+            _blib = torch.library.Library("kernelagent", "DEF")
+        except RuntimeError:
+            _blib = torch.library.Library("kernelagent", "FRAGMENT")
+        _blib.define(_BACKWARD_SCHEMA)
+        _bwd_fn = getattr(_kernel_mod, _BACKWARD_ENTRY)
+        _blib.impl(_BACKWARD_OP, _bwd_fn, _DISPATCH_KEY)
+
+    class _KA_{op}_Fn(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, *args):
+            ctx.save_for_backward(*args)
+            # Route through the guarded wrapper so R9 dtype/device checks
+            # apply to the separate-style forward as well.
+            return _guarded_forward(*args)
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            saved = ctx.saved_tensors
+            return getattr(_kernel_mod, _BACKWARD_ENTRY)(grad_output, *saved)
+
+    def _ka_{op}(*a, **kw):
+        return _KA_{op}_Fn.apply(*a, **kw)
 
 _ops_registered = _OP  # introspection helper
 '''
@@ -875,33 +1545,11 @@ def _derive_steps_from_train_script(
     if not injected_path.is_file():
         return None
     steps: list[dict] = []
-    # numeric_check: write a quote-safe helper so shell quoting cannot break
-    # the one-liner, and run on MUSA when available (native bundles reject CPU).
-    check_py = store / f"_numeric_check_{op}.py"
-    check_py.write_text(
-        "import sys\n"
-        "import torch\n"
-        "import torch.nn.functional as F\n"
-        "import kernelagent_runtime  # noqa: F401\n"
-        f"op = torch.ops.kernelagent.{op}\n"
-        "device = 'musa' if hasattr(torch, 'musa') and torch.musa.is_available() else 'cpu'\n"
-        "ok = True\n"
-        "for shape in [(4,), (2, 3), (8, 16)]:\n"
-        "    x = torch.randn(*shape, device=device)\n"
-        "    y = op(x)\n"
-        f"    ref = F.{op}(x)\n"
-        "    if not torch.allclose(y.cpu(), ref.cpu(), atol=1e-5):\n"
-        "        ok = False\n"
-        "        print(f'[FAIL] numeric_check shape={shape}')\n"
-        "        sys.exit(1)\n"
-        "print('[PASS] numeric_check')\n",
-        encoding="utf-8",
-    )
-    steps.append({
-        "name": "numeric_check",
-        "cmd": f'python "{check_py}"',
-        "expect_contains": "[PASS]",
-    })
+    # NOTE: The forward numeric_check step was intentionally removed. KernelAgent
+    # already performs numerical-precision verification on each generated operator,
+    # so the injector no longer replicates that check (avoids a redundant, and for
+    # some ops incorrect, F.{op}-based reference comparison). Verification now
+    # relies solely on the injected-script training step below.
     # train step using the injected script
     cmd = f'python "{injected_path}"'
     if train_args:
@@ -1103,18 +1751,57 @@ def do_deploy(payload: dict, working_dir: Path) -> dict:
         allow_baseline=payload.get("allow_baseline", True),
         trace=tc
     )
+    # Enforce the baseline guard for every source form, not just example names.
+    if ref["kind"] == "baseline" and not payload.get("allow_baseline", True):
+        tc.add("source.gate", "kind=baseline with allow_baseline=false -> refused")
+        raise BridgeError(
+            f"source resolved to a baseline bundle ({ref['best_bundle_dir']}) and "
+            f"allow_baseline=false; deploy a real generation run instead"
+        )
     bundle_dir = Path(ref["best_bundle_dir"])
     backend = ref["backend"]
     files = MUSA_FILES if backend == "musa" else TRITON_FILES
 
-    # Op name: op_name (priority 2) > problem.py semantic parse (priority 3).
-    # target_op (priority 1) is accepted if present but not exposed by the
+    # S7-1: synthesise/read metadata (Solution-A unified entry point) and
+    # cross-check the extension name against kernel.py (A8/R3).
+    run_dir_for_meta = Path(ref["run_dir"]) if ref.get("run_dir") else (
+        Path(ref["best_bundle_dir"]).parent if ref.get("best_bundle_dir") else None
+    )
+    meta = _read_metadata(bundle_dir, run_dir=run_dir_for_meta)
+    ref["meta"] = meta
+    tc.add("meta.read", f"_read_metadata => op={meta.get('op')!r} backward_mode={meta.get('backward_mode')!r}")
+    _cross_check_extension(meta, bundle_dir / "kernel.py", tc)
+
+    # R5: skip CUDA-backend operators (still in development); abort before build.
+    if _is_cuda_backend(bundle_dir, meta):
+        msg = (
+            "[ka-inject] CUDA backend operator detected — "
+            "CUDA branch still in development (doing...); "
+            "deployment aborted. Use a MUSA/triton bundle for now."
+        )
+        print(msg)
+        return {
+            "status": "skipped",
+            "reason": "cuda_backend_not_supported",
+            "message": msg,
+            "op": meta.get("op"),
+            "trace": tc.to_list(),
+        }
+
+    # Op name resolution (Solution-A priority): payload.op_name (1) >
+    # metadata.op (2) > problem.py semantic parse (3).
+    # target_op (priority 0) is accepted if present but not exposed by the
     # batch-1 TS tool.
     op_input = payload.get("op_name")
     if op_input:
-        tc.add("opname.input", f"payload.op_name={op_input!r} (priority 2)")
-    op = op_input or (derive_op_from_problem(Path(ref["problem_py"]), trace=tc)
-                      if ref["problem_py"] else "")
+        tc.add("opname.input", f"payload.op_name={op_input!r} (priority 1)")
+    meta_op = (ref.get("meta") or {}).get("op") if isinstance(ref, dict) else None
+    if not op_input and meta_op:
+        tc.add("opname.meta", f"metadata.op={meta_op!r} (priority 2)")
+        op = meta_op
+    else:
+        op = op_input or (derive_op_from_problem(Path(ref["problem_py"]), trace=tc)
+                          if ref["problem_py"] else "")
     if not op:
         tc.add("opname.check", "op_name not provided and problem.py not found; op_name required")
         raise BridgeError(
@@ -1131,8 +1818,8 @@ def do_deploy(payload: dict, working_dir: Path) -> dict:
     check_op_target_consistency(op, target)
     tc.add("opname.check", f"op='{op}' aligned -> ok")
 
-    schema = derive_schema(bundle_dir / "kernel.py", op)
-    tc.add("schema.parse", f"kernel_function signature => '{schema}'")
+    schema = derive_schema(bundle_dir / "kernel.py", op, meta=meta)
+    tc.add("schema.parse", f"schema => '{schema}' (meta_priority={bool(meta.get('schema'))})")
     dispatch_key = "PrivateUse1" if backend == "musa" else "CUDA"
 
     op_dir = store / "ops" / op
@@ -1146,11 +1833,31 @@ def do_deploy(payload: dict, working_dir: Path) -> dict:
     else:
         op_dir.mkdir(parents=True)
 
+    # S7-4: persist the resolved metadata for downstream consumers
+    # (generate_injected_train_script / verify) under ops/<op>/_meta.json.
+    (op_dir / "_meta.json").write_text(
+        json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    tc.add("meta.write", f"ops/{op}/_meta.json written")
+
     hashes: dict[str, str] = {}
     for f in files:
         shutil.copy2(bundle_dir / f, op_dir / f)
         hashes[f] = sha256_of(op_dir / f)
         tc.add("deploy.copy", f"{f} <- {bundle_dir / f} sha256={hashes[f][:16]}...")
+
+    # R2: resolve separate-style backward wiring parameters for the integration
+    # template. For autograd_function style the backward is embedded, so the extra
+    # op/schema are left empty (the template only uses them inside the separate
+    # branch). backward_schema is synthesised from kernel_backward's AST when the
+    # bundle does not ship one (no cross-file change to the generator needed).
+    _bwd = _get_backward_info(op, op_dir, meta)
+    _bwd_style = _bwd.get("style", "autograd_function")
+    _bwd_op = f"{op}_bwd"
+    _bwd_entry = _bwd.get("backward_entry") or "kernel_backward"
+    _bwd_schema = ""
+    if _bwd_style == "separate":
+        _bwd_schema = _derive_backward_schema(bundle_dir / "kernel.py", op, meta=meta)
 
     (op_dir / "torch_integration.py").write_text(
         TORCH_INTEGRATION_TEMPLATE.format(
@@ -1159,7 +1866,14 @@ def do_deploy(payload: dict, working_dir: Path) -> dict:
             kind=ref["kind"],
             op=op,
             dispatch_key=dispatch_key,
+            forward_entry=meta.get("forward_entry", "kernel_function"),
             schema=schema,
+            dtype=_normalize_list(meta.get("dtype")),
+            device=_normalize_list(meta.get("device")),
+            backward_style=_bwd_style,
+            backward_op=_bwd_op,
+            backward_entry=_bwd_entry,
+            backward_schema=_bwd_schema,
         ),
         encoding="utf-8",
     )
@@ -1167,7 +1881,7 @@ def do_deploy(payload: dict, working_dir: Path) -> dict:
     build_info: dict = {"performed": False, "success": True, "ext_name": None, "log": None}
     if want_build and backend == "musa":
         build_info["performed"] = True
-        build_info["ext_name"] = parse_ext_name(op_dir / "setup.py")
+        build_info["ext_name"] = meta.get("extension_module") or parse_ext_name(op_dir / "setup.py")
         log_path = op_dir / "build.log"
         try:
             r = subprocess.run(
@@ -1196,6 +1910,9 @@ def do_deploy(payload: dict, working_dir: Path) -> dict:
         )
     if ref["kind"] == "baseline":
         warn += "\n> [note] baseline bundle deployed (unoptimized reference).\n"
+    elif ref["kind"] == "local":
+        warn += ("\n> [note] caller-supplied bundle (kind=local); provenance is not an "
+                 "examples/<example>/results/run_* layout.\n")
 
     store_str = str(store)
     train_dir_env = os.environ.get("KERNELAGENT_TRAIN_DIR", "").strip()
@@ -1208,7 +1925,7 @@ def do_deploy(payload: dict, working_dir: Path) -> dict:
     if train_script_raw:
         try:
             injected_path = generate_injected_train_script(
-                Path(train_script_raw), op, trace=tc
+                Path(train_script_raw), op, trace=tc, meta=meta, schema=schema
             )
         except BridgeError:
             raise
