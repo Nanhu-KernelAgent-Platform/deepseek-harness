@@ -10,4 +10,6 @@ Run `pnpm run build` after changing client sources, then `./start_dsh.sh`. The l
 
 Generated files are stored in tool presentation metadata and displayed with per-file downloads. Only the concise status reaches the next model request. A request for backward or gradients is prepared as one bound forward/backward reference, then one generate call creates, verifies, and binds the complete native bundle; automatic optimization then runs separate forward and backward passes with direction-specific latency and MCU measurements. Generate reports correctness without adding benchmarks; optimize reports existing optimization measurements. Historical Markdown reports remain readable. The legacy run_example mode can return cached fallback artifacts and is not evidence of a fresh successful optimization; synthetic charts are not emitted.
 
+With automatic injection enabled, a verified final bundle is persisted under the active Workspace at `.kernelagent/artifacts/<content-hash>/best_bundle`. The injector resolves relative deployment and training-script paths from that Workspace; an empty deployment setting uses `.kernelagent/runtime`. `KERNELAGENT_WORKING_DIR` remains the KernelAgent checkout and is not treated as the user Workspace.
+
 Run plugin tests with `pnpm vitest run --config scratch-plugin/vitest.config.mts`.

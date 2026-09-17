@@ -11,6 +11,12 @@ spec = importlib.util.spec_from_file_location('bridge', Path(__file__).parents[1
 bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
 
+injector_spec = importlib.util.spec_from_file_location(
+    "injector_bridge", Path(__file__).parents[1] / "kernelagent_injector_bridge.py"
+)
+injector_bridge = importlib.util.module_from_spec(injector_spec)
+injector_spec.loader.exec_module(injector_bridge)
+
 
 class AutoOptimizeTests(unittest.TestCase):
     def setUp(self):
@@ -155,6 +161,84 @@ class AutoOptimizeTests(unittest.TestCase):
                 self.assertEqual(result['files'], self.files)
                 self.assertEqual(result['optimization_status'], 'failed')
                 self.assertTrue(result['optimization_error'])
+
+
+    def test_verified_bundle_is_persisted_in_active_workspace(self):
+        self.payload["options"]["auto_optimize"] = False
+        with tempfile.TemporaryDirectory() as directory:
+            self.payload["workspace_dir"] = directory
+            self.payload["harness_session_id"] = "session:one"
+            result = bridge.run_generate(self.payload)
+
+            bundle = Path(result["best_bundle_dir"])
+            self.assertTrue(bundle.is_relative_to(Path(directory)))
+            self.assertEqual(bundle.parent.name, result["artifact_id"])
+            self.assertEqual(result["best_bundle_source"], str(Path(".kernelagent", "artifacts", result["artifact_id"], "best_bundle")))
+            self.assertEqual((bundle / "kernel.py").read_text(), "initial wrapper")
+            self.assertEqual((bundle / "kernel.mu").read_text(), "initial native source")
+            self.assertEqual((bundle.parent / "problem.py").read_text(), self.payload["reference_code"])
+            self.assertEqual(result["workspace_dir"], str(Path(directory).resolve()))
+
+    def test_auto_inject_uses_persisted_workspace_bundle(self):
+        self.payload["options"].update({
+            "auto_optimize": False, "auto_inject": True, "inject_verify": False,
+            "inject_deploy_dir": ".kernelagent/custom-runtime",
+            "inject_train_script": "train.py", "inject_op_name": "square",
+        })
+        deploy = Mock(return_value={
+            "success": True, "verified": False, "deploy_dir": "/runtime",
+            "injected_train_script": "/workspace/train_ka_injected.py",
+        })
+        modules = {"kernelagent_injector_bridge": types.SimpleNamespace(do_deploy=deploy)}
+        with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules, modules):
+            self.payload["workspace_dir"] = directory
+            result = bridge.run_generate(self.payload)
+
+        injected_payload = deploy.call_args.args[0]
+        self.assertEqual(injected_payload["source"], result["best_bundle_dir"])
+        self.assertEqual(injected_payload["workspace_dir"], str(Path(directory).resolve()))
+        self.assertEqual(injected_payload["deploy_dir"], ".kernelagent/custom-runtime")
+        self.assertEqual(injected_payload["train_script"], "train.py")
+        self.assertFalse(injected_payload["allow_baseline"])
+        self.assertEqual(result["injection_status"], "completed")
+
+    def test_failed_optimization_keeps_artifact_but_skips_auto_injection(self):
+        self.payload["options"]["auto_inject"] = True
+        deploy = Mock()
+        modules = {"kernelagent_injector_bridge": types.SimpleNamespace(do_deploy=deploy)}
+        with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules, modules):
+            self.payload["workspace_dir"] = directory
+            with patch.object(bridge, "run_optimize", return_value={
+                "success": False, "error": "benchmark failed",
+            }):
+                result = bridge.run_generate(self.payload)
+                artifact_exists = Path(result["best_bundle_dir"]).is_dir()
+
+        deploy.assert_not_called()
+        self.assertTrue(artifact_exists)
+        self.assertEqual(result["injection_status"], "skipped")
+
+    def test_injector_resolves_workspace_relative_paths_and_default_store(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory, "workspace")
+            working_dir = Path(directory, "kernelagent")
+            bundle = workspace / ".kernelagent" / "artifacts" / "s" / "a" / "best_bundle"
+            bundle.mkdir(parents=True)
+            working_dir.mkdir()
+            (bundle / "kernel.py").write_text(
+                "def kernel_function(x):\n    return x\n", encoding="utf-8"
+            )
+            result = injector_bridge.do_deploy({
+                "source": str(bundle.relative_to(workspace)),
+                "workspace_dir": str(workspace), "op_name": "relu",
+                "build": False, "verify": False,
+            }, working_dir)
+
+            expected_store = workspace / ".kernelagent" / "runtime"
+            self.assertTrue(result["success"])
+            self.assertEqual(result["workspace_dir"], str(workspace.resolve()))
+            self.assertEqual(result["deploy_dir"], str(expected_store.resolve()))
+            self.assertTrue((expected_store / "ops" / "relu" / "kernel.py").is_file())
 
 
 if __name__ == '__main__':

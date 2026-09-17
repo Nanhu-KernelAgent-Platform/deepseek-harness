@@ -10,4 +10,6 @@ KERNELAGENT_WORKING_DIR 指定 KernelAgent 项目，默认是相邻的 KernelAge
 
 生成文件保存在工具展示元数据中，支持逐文件下载；只有简短状态进入下一次模型请求。用户要求反向或梯度时，描述阶段会准备一个绑定的正反向参考实现，随后只调用一次 generate，统一生成、验证并绑定完整原生算子包；自动优化再基于各自的耗时和 MCU 数据分别执行正向、反向优化。Generate 报告正确性且不额外测速，optimize 报告已有优化数据。历史 Markdown 报告仍可读取。旧 run_example 模式可能返回缓存产物，不能据此认定本次优化成功；桥接脚本不输出模拟图表。
 
+启用自动注入后，通过验证的最终算子包会保存到当前工作区的 `.kernelagent/artifacts/<内容哈希>/best_bundle`。injector 以该工作区解析相对部署目录和训练脚本路径；部署目录留空时使用 `.kernelagent/runtime`。`KERNELAGENT_WORKING_DIR` 仍仅表示 KernelAgent 代码目录，不再视为用户工作区。
+
 通过 `pnpm vitest run --config scratch-plugin/vitest.config.mts` 运行插件测试。

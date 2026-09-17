@@ -49,6 +49,12 @@ export function mergeKernelAgentConfig(args: any, globalConfig: any) {
     model: nonEmptyString(globalConfig.modelName) ?? nonEmptyString(args.model) ?? 'deepseek-chat',
     workers: globalConfig.workers ?? args.workers ?? 4,
     auto_optimize: globalConfig.autoOptimize ?? false,
+    auto_inject: globalConfig.autoInject ?? false,
+    inject_deploy_dir: nonEmptyString(globalConfig.injectDeployDir),
+    inject_train_script: nonEmptyString(globalConfig.injectTrainScript),
+    inject_train_args: nonEmptyString(globalConfig.injectTrainArgs),
+    inject_op_name: nonEmptyString(globalConfig.injectOpName),
+    inject_verify: globalConfig.injectVerify ?? true,
     generation_max_rounds: globalConfig.generationMaxRounds ?? 8,
     max_rounds: globalConfig.maxRounds ?? args.max_rounds ?? 8,
     verify: globalConfig.verify ?? args.verify ?? true,
@@ -77,7 +83,7 @@ export function apply(ctx: Context) {
     name: 'tool:kernelagent',
     order: 210,
     text: `Use the kernelagent tool to generate, fuse, optimize GPU Triton kernels, or run a predefined example.
-Modes: generate | fuse | optimize | run_example. In generate mode, the saved autoOptimize setting automatically runs performance optimization after correctness verification; do not issue a second optimize call for that workflow. Report optimization_status and optimization_error when returned.
+Modes: generate | fuse | optimize | run_example. In generate mode, saved autoOptimize runs performance optimization after correctness verification. Saved autoInject then persists the final verified bundle in the active Workspace, compiles it into the configured runtime directory, injects the configured training script, and verifies that the kernel ran; do not issue duplicate optimize or inject calls. Report optimization_status, injection_status, and their errors when returned.
 ${exampleList}
 When the user asks to run an example, map their natural-language description to the closest example name above and call run_example with that exact example_name. If the user names an example that is not in the list, report the available examples and ask them to pick one.
 For generate, fuse, or optimize: call kernelagent_describe first; those modes refuse to run without its prepared prompt, and problem_code is taken from that prompt (do not invent one). If the user requests backward or gradients, call kernelagent_describe once with kind=forward_backward and kernelagent once. That single generation binds and verifies both directions, then automatic optimization tunes forward and backward separately; never issue separate forward and backward kernelagent calls.
@@ -143,6 +149,17 @@ The KernelAgent tool card displays available generated source files and per-file
           kernel_path: { type: 'string' },
           session_dir: { type: 'string' },
           artifacts_dir: { type: 'string' },
+          artifact_id: { type: 'string' },
+          best_bundle_dir: { type: 'string' },
+          artifact_relative_dir: { type: 'string' },
+          best_bundle_source: { type: 'string' },
+          workspace_dir: { type: 'string' },
+          deploy_dir: { type: 'string' },
+          injected_train_script: { type: 'string' },
+          injection_status: { type: 'string' },
+          injection_verified: { type: 'boolean' },
+          injection_error: { type: 'string' },
+          artifact_error: { type: 'string' },
           initial_time_ms: { type: 'number' },
           verification_status: { type: 'string' },
           pytorch_baseline_ms: { type: 'number' },
@@ -161,6 +178,12 @@ The KernelAgent tool card displays available generated source files and per-file
         if (value.verification_status) lines.push(`Correctness verification: ${value.verification_status}`)
         if (value.optimization_status) lines.push(`Optimization: ${value.optimization_status}`)
         if (value.optimization_error) lines.push(`Optimization error (verified generated kernel retained): ${value.optimization_error}`)
+        if (value.injection_status) lines.push(`Workspace injection: ${value.injection_status}`)
+        if (value.injection_error) lines.push(`Injection error: ${value.injection_error}`)
+        if (value.artifact_error) lines.push(`Artifact error: ${value.artifact_error}`)
+        if (value.best_bundle_source) lines.push(`Deployable bundle: ${value.best_bundle_source}`)
+        if (value.deploy_dir) lines.push(`Runtime store: ${value.deploy_dir}`)
+        if (value.injected_train_script) lines.push(`Injected training script: ${value.injected_train_script}`)
         if (directional) {
           for (const direction of ['forward', 'backward']) {
             const result = directional[direction]
@@ -171,6 +194,9 @@ The KernelAgent tool card displays available generated source files and per-file
             if (Number.isFinite(result.initial_time_ms) && result.initial_time_ms > 0 && Number.isFinite(result.best_time_ms) && result.best_time_ms > 0) {
               lines.push(`${label} perf: ${result.initial_time_ms.toFixed(3)}ms → ${result.best_time_ms.toFixed(3)}ms`)
               lines.push(`${label} speedup: ${(result.initial_time_ms / result.best_time_ms).toFixed(3)}x`)
+              if (Number.isFinite(result.pytorch_baseline_ms) && result.pytorch_baseline_ms > 0) {
+                lines.push(`${label} PyTorch baseline: ${result.pytorch_baseline_ms.toFixed(3)}ms; speedup vs PyTorch: ${(result.pytorch_baseline_ms / result.best_time_ms).toFixed(3)}x`)
+              }
             }
             if (result.bottleneck) lines.push(`${label} MCU bottleneck: ${result.bottleneck}`)
             if (Number.isFinite(result.compute_sol_pct) && Number.isFinite(result.memory_sol_pct)) {
@@ -181,7 +207,7 @@ The KernelAgent tool card displays available generated source files and per-file
         if (value.rounds != null) lines.push(`Generation rounds: ${value.rounds}`)
         if (value.kernel_path) lines.push(`Kernel: ${value.kernel_path}`)
         if (value.session_dir) lines.push(`Session: ${value.session_dir}`)
-        if (value.artifacts_dir) lines.push(`Artifacts: ${value.artifacts_dir}`)
+        if (value.artifacts_dir && !value.artifact_relative_dir) lines.push(`Artifacts: ${value.artifacts_dir}`)
         if (!directional && (args.mode === 'optimize' || value.optimization_status === 'completed') && Number.isFinite(value.initial_time_ms) && value.initial_time_ms > 0
           && Number.isFinite(value.best_time_ms) && value.best_time_ms > 0) {
           lines.push(`Perf: ${value.initial_time_ms.toFixed(3)}ms → ${value.best_time_ms.toFixed(3)}ms`)
@@ -215,6 +241,7 @@ The KernelAgent tool card displays available generated source files and per-file
               const result = directional[direction]
               const label = direction === 'forward' ? 'Forward' : 'Backward'
               return result ? [
+                { label: `${label} PyTorch`, value: result.pytorch_baseline_ms },
                 { label: `${label} initial`, value: result.initial_time_ms },
                 { label: `${label} best`, value: result.best_time_ms },
               ] : []
@@ -268,6 +295,8 @@ The KernelAgent tool card displays available generated source files and per-file
         problem_code: problemCode,
         reference_code: referenceCode,
         describe_kind: describeKind,
+        workspace_dir: exec.agent?.session.header.cwd,
+        harness_session_id: exec.agent?.session.header.id,
         initial_kernel: args.initial_kernel,
         test_code: args.test_code,
         options: {

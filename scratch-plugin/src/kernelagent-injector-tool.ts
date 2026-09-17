@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { CONFIG_TOOL_SETTINGS_NAMESPACE, type Config } from './kernelagent-config-tool.ts'
 
 // ========== Runtime configuration via environment variables ==========
 // These are injected by start_dsh.sh or the host environment.
@@ -24,7 +25,7 @@ const INJECTOR_BRIDGE = requiredEnvironment('KERNELAGENT_INJECTOR_BRIDGE')
 const CWD = requiredEnvironment('KERNELAGENT_WORKING_DIR')
 
 export const name = 'kernelagent-injector-tool'
-export const inject = ['tools', 'systemPrompt']
+export const inject = ['tools', 'systemPrompt', 'settings']
 
 export function apply(ctx: Context) {
   ctx.systemPrompt.section({
@@ -34,7 +35,7 @@ export function apply(ctx: Context) {
 Input "source" accepts: an example name (e.g. optimize_06_musa_relu, the latest run is picked automatically), a run directory, a best_bundle absolute path, a single-file kernel (triton) or a serialized payload file ("FILE: ..." blocks).
 R1 real-generation priority: resolver prefers results/run_* (real optimized kernel) over baseline_bundle/ (fallback). If the example has no run_* results but has a baseline_bundle/, the baseline is used as fallback (manifest marks source.kind=baseline). Use allow_baseline=false to enforce real optimized kernel and prevent deploying unoptimized baseline (the guard applies to every source form, including a directory or best_bundle path).
 R2 source.kind is provenance-based, never guessed from a directory name: "run" = a results/run_* bundle, "baseline" = an examples/<example>/baseline_bundle or a directory literally named baseline_bundle, "local" = a caller-supplied bundle that is neither (it is NOT an unoptimized baseline, so allow_baseline does not apply to it). status for a "local" bundle is read from its own provenance metadata (demo_summary.json / result.json / _meta.json / _provenance.json, following a result_json pointer to the real generation result); "UNKNOWN" means no provenance file was found. Report source.kind and status as returned — do not restate a "local" bundle as a baseline.
-R3 deploy_dir: optionally deploy to a user-specified directory instead of the default store. The directory is bootstrapped as a self-contained store (kernelagent_runtime package auto-copied if missing). Activation hint points to deploy_dir.
+R3 deploy_dir: defaults to <active Workspace>/.kernelagent/runtime. A saved or per-call custom directory overrides that default. The directory is bootstrapped as a self-contained store (kernelagent_runtime package auto-copied if missing). Activation hint points to deploy_dir.
 When the user names the operator to replace, pass op_name aligned with the target training op (e.g. replacing F.relu -> op_name=relu).
 By default (verify=true, the REQUIRED flow) the tool also runs the real training task to confirm the operator is actually integrated. R5 dynamic verify step generation uses four priorities: (P1) verify_cmd user command, (P2) train_script-derived steps from R6-generated injected script, (P3) <train_dir>/verify_tasks.json convention file, (P4) built-in defaults for known ops. The report contains an "integration verify" section with PASS/FAIL per step, the kernel call count (proof the injected path was taken), and an overall verdict. Only report "integrated/verified" when the verify section is PASS; deploy alone is NOT sufficient.
 R6 train_script: when provided, the bridge auto-generates an injected training script (<stem>_ka_injected.py) by AST-analyzing the original and inserting a kernelagent-runtime scaffold that patches torch.nn.functional and torch module attributes (alias-proof). The injected script is then used as the P2 verify train step.
@@ -81,7 +82,7 @@ Output the report field verbatim, including any code fences.`,
       deploy_dir: {
         type: 'string',
         description:
-          'User-specified deployment directory (default = KERNELAGENT_RUNTIME_STORE). ' +
+          'User-specified deployment directory (default = <active Workspace>/.kernelagent/runtime). ' +
           'The directory is bootstrapped as a self-contained store (kernelagent_runtime package copied if missing). ' +
           'Activation hint will point to this directory.',
       },
@@ -142,22 +143,25 @@ Output the report field verbatim, including any code fences.`,
       },
     },
     async execute(args: any, exec: any) {
+      const globalConfig = ctx.settings.get(CONFIG_TOOL_SETTINGS_NAMESPACE) as Config | undefined
+      const workspaceDir = exec?.agent?.session.header.cwd
       const tmpDir = mkdtempSync(join(tmpdir(), 'kainj-'))
       const inputPath = join(tmpDir, 'input.json')
       const outputPath = join(tmpDir, 'output.json')
 
       const payload: Record<string, unknown> = {
         source: args.source,
-        op_name: args.op_name,
+        op_name: args.op_name || globalConfig?.injectOpName || undefined,
         build: args.build,
-        verify: args.verify,
+        verify: args.verify ?? globalConfig?.injectVerify,
         allow_baseline: args.allow_baseline,
-        deploy_dir: args.deploy_dir,
+        workspace_dir: workspaceDir,
+        deploy_dir: args.deploy_dir || globalConfig?.injectDeployDir || undefined,
         trace: args.trace,
         verify_cmd: args.verify_cmd,
         verify_expect: args.verify_expect,
-        train_script: args.train_script,
-        train_args: args.train_args,
+        train_script: args.train_script || globalConfig?.injectTrainScript || undefined,
+        train_args: args.train_args || globalConfig?.injectTrainArgs || undefined,
       }
       writeFileSync(inputPath, JSON.stringify(payload), 'utf-8')
 

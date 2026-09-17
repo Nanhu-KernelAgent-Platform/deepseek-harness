@@ -1,16 +1,19 @@
 Kernel workflow complete: KernelAgent ✅ succeeded
 Correctness verification: passed
 Optimization: completed
+Deployable bundle: .kernelagent/artifacts/b578c405997ac1be/best_bundle
 Forward optimization: completed
 Forward optimization rounds: 7
 Forward perf: 4.000ms → 2.000ms
 Forward speedup: 2.000x
+Forward PyTorch baseline: 6.000ms; speedup vs PyTorch: 3.000x
 Forward MCU bottleneck: memory
 Forward MCU utilization: Compute SOL 42.5%, Memory SOL 78.3%
 Backward optimization: completed
 Backward optimization rounds: 7
 Backward perf: 6.000ms → 3.000ms
 Backward speedup: 2.000x
+Backward PyTorch baseline: 6.000ms; speedup vs PyTorch: 2.000x
 Backward MCU bottleneck: compute
 Backward MCU utilization: Compute SOL 42.5%, Memory SOL 78.3%
 Generation rounds: 2

@@ -48,6 +48,12 @@ describe('mergeKernelAgentConfig', () => {
       workers: 1,
       max_rounds: 1,
       auto_optimize: false,
+      auto_inject: false,
+      inject_deploy_dir: undefined,
+      inject_train_script: undefined,
+      inject_train_args: undefined,
+      inject_op_name: undefined,
+      inject_verify: true,
       generation_max_rounds: 8,
       verify: true,
       platform: 'musa',
@@ -63,6 +69,18 @@ describe('mergeKernelAgentConfig', () => {
     expect(mergeKernelAgentConfig({ auto_optimize: false }, {
       autoOptimize: true, generationMaxRounds: 3, maxRounds: 7,
     })).toMatchObject({ auto_optimize: true, generation_max_rounds: 3, max_rounds: 7 })
+  })
+
+  it('takes Workspace injector settings from the saved configuration', () => {
+    expect(mergeKernelAgentConfig({}, {
+      autoInject: true, injectDeployDir: '.kernelagent/runtime-custom',
+      injectTrainScript: 'train.py', injectTrainArgs: '--epochs 1',
+      injectOpName: 'relu', injectVerify: false,
+    })).toMatchObject({
+      auto_inject: true, inject_deploy_dir: '.kernelagent/runtime-custom',
+      inject_train_script: 'train.py', inject_train_args: '--epochs 1',
+      inject_op_name: 'relu', inject_verify: false,
+    })
   })
 
   it('ignores blank model values and uses a safe fallback', () => {
@@ -116,6 +134,16 @@ describe('KernelAgent result projection', () => {
     expect(tool.output.render({ mode: 'generate' }, profiled)[0].text)
       .toContain('MCU utilization: Compute SOL 33.3%, Memory SOL 81.3%')
     expect(tool.output.presentationMeta({ mode: 'generate' }, value).kernelagentChart).toBeDefined()
+    const directional = { success: true, optimization_status: 'completed', directional_optimizations: {
+      forward: { success: true, pytorch_baseline_ms: 8, initial_time_ms: 4, best_time_ms: 2 },
+      backward: { success: true, pytorch_baseline_ms: 12, initial_time_ms: 6, best_time_ms: 3 },
+    } }
+    expect(tool.output.render({ mode: 'generate' }, directional)[0].text)
+      .toContain('Forward PyTorch baseline: 8.000ms; speedup vs PyTorch: 4.000x')
+    expect(JSON.parse(tool.output.presentationMeta({ mode: 'generate' }, directional).kernelagentChart).data).toEqual([
+      { label: 'Forward PyTorch', value: 8 }, { label: 'Forward initial', value: 4 }, { label: 'Forward best', value: 2 },
+      { label: 'Backward PyTorch', value: 12 }, { label: 'Backward initial', value: 6 }, { label: 'Backward best', value: 3 },
+    ])
     expect(tool.output.render({ mode: 'generate' }, {
       success: true, optimization_status: 'failed', optimization_error: 'GPU unavailable',
     })[0].text).toContain('verified generated kernel retained')

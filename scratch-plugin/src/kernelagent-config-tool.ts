@@ -23,6 +23,18 @@ export interface Config {
   /** Maximum optimization rounds (1–50). */
   maxRounds: number
   autoOptimize: boolean
+  /** Persist a verified generated bundle and deploy it into the active Workspace. */
+  autoInject: boolean
+  /** Optional deployment directory; blank uses <Workspace>/.kernelagent/runtime. */
+  injectDeployDir: string
+  /** Optional training script, resolved relative to the active Workspace. */
+  injectTrainScript: string
+  /** Optional arguments passed to the generated injected training script. */
+  injectTrainArgs: string
+  /** Optional registered operator name; blank lets bundle metadata derive it. */
+  injectOpName: string
+  /** Run the injected training script and require evidence that the kernel ran. */
+  injectVerify: boolean
   generationMaxRounds: number
   /** Target GPU platform. */
   platform: 'cuda' | 'musa' | 'xpu'
@@ -46,6 +58,12 @@ export const ConfigSchema: Schema<Config> = Schema.object({
   baseURL: Schema.string().pattern(/^https?:\/\//).default('https://api.deepseek.com/v1/chat/completions').description('API 地址'),
   workers: Schema.number().default(4).min(1).max(16).description('并行优化工作线程数'),
   autoOptimize: Schema.boolean().default(false).description('生成后自动优化'),
+  autoInject: Schema.boolean().default(false).description('生成后自动编译、部署并注入当前工作区'),
+  injectDeployDir: Schema.string().default('').description('Kernel 部署目录（留空使用当前工作区/.kernelagent/runtime）'),
+  injectTrainScript: Schema.string().default('').description('训练脚本（相对当前工作区或绝对路径）'),
+  injectTrainArgs: Schema.string().default('').description('注入后训练脚本参数'),
+  injectOpName: Schema.string().default('').description('目标算子名称（留空从 Kernel 元数据推导）'),
+  injectVerify: Schema.boolean().default(true).description('运行注入后的训练代码并验证 Kernel 调用'),
   generationMaxRounds: Schema.number().default(8).min(1).max(50).description('生成纠错轮数'),
   maxRounds: Schema.number().default(8).min(1).max(50).description('最大优化轮数'),
   platform: Schema.union(['cuda', 'musa', 'xpu']).default('musa').description('目标平台: cuda / musa / xpu'),

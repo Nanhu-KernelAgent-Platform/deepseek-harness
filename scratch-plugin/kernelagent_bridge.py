@@ -3,6 +3,7 @@
 
 import argparse
 import ast
+import hashlib
 import json
 import sys
 import os
@@ -72,6 +73,116 @@ def serialize_kernel_payload(kernel_code) -> dict:
     if files:
         return {"kernel_code": files, "files": files}
     return {"kernel_code": code}
+
+
+def persist_workspace_bundle(payload: dict, kernel_code, status: str) -> dict:
+    """Persist a content-addressed bundle under the active Workspace."""
+    workspace_raw = str(payload.get("workspace_dir") or "").strip()
+    if not workspace_raw:
+        return {}
+    workspace_dir = Path(workspace_raw).expanduser().resolve()
+    serialized = serialize_kernel_payload(kernel_code)
+    files = serialized.get("files")
+    if not files:
+        code = serialized.get("kernel_code")
+        if not isinstance(code, str) or not code.strip():
+            raise ValueError("Verified kernel has no deployable source files")
+        files = {"kernel.py": code}
+    reference_code = payload.get("reference_code")
+    fingerprint = json.dumps({
+        "files": files, "reference_code": reference_code, "status": status,
+    }, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    artifact_id = hashlib.sha256(fingerprint).hexdigest()[:16]
+    artifact_relative_dir = Path(".kernelagent") / "artifacts" / artifact_id
+    artifact_dir = workspace_dir / artifact_relative_dir
+    bundle_dir = artifact_dir / "best_bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    for name, content in files.items():
+        relative = Path(name)
+        if relative.name != name or name in (".", ".."):
+            raise ValueError(f"Unsafe kernel bundle filename: {name!r}")
+        (bundle_dir / name).write_text(content, encoding="utf-8")
+    if isinstance(reference_code, str) and reference_code.strip():
+        (artifact_dir / "problem.py").write_text(reference_code, encoding="utf-8")
+    provenance = {
+        "schema_version": 1,
+        "status": status,
+        "verification_status": "passed",
+        "describe_kind": payload.get("describe_kind"),
+        "harness_session_id": payload.get("harness_session_id"),
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    (artifact_dir / "_provenance.json").write_text(
+        json.dumps(provenance, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return {
+        "artifact_id": artifact_id,
+        "artifacts_dir": str(artifact_dir),
+        "best_bundle_dir": str(bundle_dir),
+        "workspace_dir": str(workspace_dir),
+        "artifact_relative_dir": str(artifact_relative_dir),
+        "best_bundle_source": str(artifact_relative_dir / "best_bundle"),
+    }
+
+
+def finalize_generated_result(payload: dict, result: dict, kernel_code) -> dict:
+    """Persist the verified result and optionally run the Workspace injector."""
+    if not result.get("success"):
+        return result
+    try:
+        result.update(persist_workspace_bundle(
+            payload, kernel_code, str(result.get("optimization_status") or "generated")
+        ))
+    except Exception as exc:
+        result["artifact_error"] = str(exc)
+        if payload.get("options", {}).get("auto_inject"):
+            result["injection_status"] = "failed"
+            result["injection_error"] = f"Could not persist deployable bundle: {exc}"
+        return result
+
+    options = payload.get("options", {})
+    if not options.get("auto_inject"):
+        return result
+    if result.get("optimization_status") == "failed":
+        result["injection_status"] = "skipped"
+        result["injection_error"] = (
+            "Automatic optimization failed; verified generated bundle was retained but not deployed"
+        )
+        return result
+    try:
+        import kernelagent_injector_bridge as injector
+
+        verify = bool(options.get("inject_verify", True))
+        injection = injector.do_deploy({
+            "source": result["best_bundle_dir"],
+            "workspace_dir": result["workspace_dir"],
+            "deploy_dir": options.get("inject_deploy_dir"),
+            "train_script": options.get("inject_train_script"),
+            "train_args": options.get("inject_train_args"),
+            "op_name": options.get("inject_op_name"),
+            "build": True,
+            "verify": verify,
+            "allow_baseline": False,
+        }, PROJECT_ROOT)
+        complete = bool(injection.get("success")) and (
+            bool(injection.get("verified")) if verify else True
+        )
+        result.update({
+            "injection_status": "completed" if complete else "failed",
+            "injection_verified": bool(injection.get("verified")),
+            "deploy_dir": injection.get("deploy_dir"),
+            "injected_train_script": injection.get("injected_train_script"),
+        })
+        if not complete:
+            result["injection_error"] = injection.get("error") or (
+                "Kernel deployed but integration verification did not pass"
+                if verify else "Kernel deployment failed"
+            )
+    except Exception as exc:
+        result["injection_status"] = "failed"
+        result["injection_error"] = str(exc)
+    return result
 
 
 def apply_runtime_credentials(payload: dict) -> None:
@@ -206,7 +317,7 @@ def run_generate(payload: dict) -> dict:
     # generate_kernel returns success only after its verification worker passes.
     payload_out["verification_status"] = "passed" if result.get("success") else "failed"
     if not options.get("auto_optimize", False):
-        return payload_out
+        return finalize_generated_result(payload, payload_out, result.get("kernel_code"))
     if not payload_out["success"]:
         return {**payload_out, "optimization_status": "skipped"}
 
@@ -224,20 +335,22 @@ def run_generate(payload: dict) -> dict:
     except Exception as exc:
         optimized = {"success": False, "error": str(exc)}
     if not optimized.get("success") or not optimized.get("kernel_code"):
-        return {
+        failed = {
             **payload_out,
             "optimization_status": "failed",
             "optimization_error": optimized.get("error") or "Optimization returned no verified kernel",
             "failed_direction": optimized.get("failed_direction"),
             "directional_optimizations": optimized.get("directional_optimizations", {}),
         }
+        return finalize_generated_result(payload, failed, result.get("kernel_code"))
     # Paths and files from generation must never be advertised as the optimized output.
-    return {
+    completed = {
         **{key: value for key, value in payload_out.items()
            if key not in ("kernel_code", "files", "kernel_path", "message")},
         **optimized,
         "optimization_status": "completed",
     }
+    return finalize_generated_result(payload, completed, optimized.get("kernel_code"))
 
 
 def serialize_fusion_result(summary: dict, verify: bool) -> dict:

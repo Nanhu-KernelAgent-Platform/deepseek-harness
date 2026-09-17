@@ -1295,13 +1295,16 @@ def materialize_bundle_from_result_json(
 
 def resolve_source(
     source: str, working_dir: Path, staging_root: Path,
-    allow_baseline: bool = True, trace: TraceCollector | None = None
+    allow_baseline: bool = True, trace: TraceCollector | None = None,
+    workspace_dir: Path | None = None,
 ) -> dict:
     """Resolve any supported source form to {bundle_dir, backend, kind, status}."""
     tc = trace or TraceCollector()
     raw = source.strip()
     tc.add("source.input", f"input={raw!r}")
-    p = Path(raw)
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = (workspace_dir or working_dir) / p
 
     # S1: example name (no path separator)
     if "/" not in raw and "\\" not in raw:
@@ -2023,11 +2026,24 @@ def do_verify(
 def do_deploy(payload: dict, working_dir: Path) -> dict:
     tc = TraceCollector()
 
+    workspace_raw = payload.get("workspace_dir")
+    workspace_dir = Path(workspace_raw or working_dir).expanduser().resolve()
     default_store = Path(
-        os.environ.get("KERNELAGENT_RUNTIME_STORE") or str(working_dir / "runtime_store")
+        str(workspace_dir / ".kernelagent" / "runtime")
+        if workspace_raw
+        else os.environ.get("KERNELAGENT_RUNTIME_STORE") or str(working_dir / "runtime_store")
     )
-    # R3: deploy_dir allows user-specified target store; defaults to default_store
-    store = Path(payload.get("deploy_dir") or payload.get("store") or default_store)
+    # R3: relative overrides are resolved inside the active Workspace.
+    store = Path(payload.get("deploy_dir") or payload.get("store") or default_store).expanduser()
+    if not store.is_absolute():
+        store = workspace_dir / store
+    store = store.resolve()
+    payload = dict(payload)
+    if payload.get("train_script"):
+        train_script = Path(payload["train_script"]).expanduser()
+        if not train_script.is_absolute():
+            train_script = workspace_dir / train_script
+        payload["train_script"] = str(train_script.resolve())
     tc.add("deploy.dir", f"store={store} (default={default_store})")
     validate_store(store)
     tc.add("deploy.dir", "validate_store ok")
@@ -2043,7 +2059,8 @@ def do_deploy(payload: dict, working_dir: Path) -> dict:
     ref = resolve_source(
         str(payload["source"]), working_dir, staging_root,
         allow_baseline=payload.get("allow_baseline", True),
-        trace=tc
+        trace=tc,
+        workspace_dir=workspace_dir,
     )
     # Enforce the baseline guard for every source form, not just example names.
     if ref["kind"] == "baseline" and not payload.get("allow_baseline", True):
@@ -2412,6 +2429,9 @@ def do_deploy(payload: dict, working_dir: Path) -> dict:
         "trace": tc.to_list(),
         "report": report,
         "activation_hint": activation_hint,
+        "workspace_dir": str(workspace_dir),
+        "deploy_dir": str(store),
+        "injected_train_script": str(injected_path) if injected_path else "",
     }
 
 
