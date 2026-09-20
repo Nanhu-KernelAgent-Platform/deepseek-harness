@@ -4,8 +4,14 @@ import { spawn } from 'node:child_process'
 import { writeFileSync, readFileSync, mkdtempSync, rmSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type {} from '@deepseek-ai/dsh-api-remotes/types'
 import { CONFIG_TOOL_SETTINGS_NAMESPACE, resolveApiKey, type Config } from './kernelagent-config-tool.ts'
 import { peekPreparedPrompt, requiresPreparedPrompt, takePreparedPrompt } from './kernelagent-prompt-store.ts'
+
+/** Cap retained bridge output so a runaway process cannot pin unbounded memory. */
+const LIVE_LOG_MAX_CHARS = 200_000
+/** Minimum interval between whole-buffer `kernelagent/log` emits. */
+const LIVE_LOG_FLUSH_MS = 100
 
 // ========== Runtime configuration via environment variables ==========
 // These are injected by start_dsh.sh or the host environment.
@@ -67,6 +73,57 @@ export function mergeKernelAgentConfig(args: any, globalConfig: any) {
       ?? true,
     strategy: nonEmptyString(globalConfig.strategy) ?? nonEmptyString(args.strategy) ?? 'beam_search',
     baseURL: nonEmptyString(globalConfig.baseURL) ?? 'https://api.deepseek.com/v1/chat/completions',
+  }
+}
+
+/**
+ * Stream bridge stdout/stderr into a capped buffer and push throttled
+ * `kernelagent/log` frames for the Web tool card. No-op when the call has no
+ * initiating session (nothing to address on the mux).
+ */
+function attachLiveLogPublisher(
+  ctx: Context,
+  sessionId: string | undefined,
+  callId: string,
+  proc: ReturnType<typeof spawn>,
+  seedText = '',
+): { getStderr(): string; flush(): void } {
+  let buffer = seedText
+  let flushTimer: ReturnType<typeof setTimeout> | null = null
+
+  const publish = (): void => {
+    if (sessionId === undefined) return
+    ctx.emit('kernelagent/log', { sessionId, callId, text: buffer })
+  }
+
+  const schedule = (): void => {
+    if (sessionId === undefined || flushTimer !== null) return
+    flushTimer = setTimeout(() => {
+      flushTimer = null
+      publish()
+    }, LIVE_LOG_FLUSH_MS)
+  }
+
+  const append = (chunk: Buffer | string): void => {
+    buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+    if (buffer.length > LIVE_LOG_MAX_CHARS) {
+      buffer = buffer.slice(-LIVE_LOG_MAX_CHARS)
+    }
+    schedule()
+  }
+
+  proc.stdout?.on('data', append)
+  proc.stderr?.on('data', append)
+
+  return {
+    getStderr: () => buffer,
+    flush: () => {
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer)
+        flushTimer = null
+      }
+      publish()
+    },
   }
 }
 
@@ -310,6 +367,9 @@ The KernelAgent tool card displays available generated source files and per-file
       }
       writeFileSync(inputPath, JSON.stringify(payload), 'utf-8')
 
+      const sessionId = exec.agent ? String(exec.agent.session.id) : undefined
+      const callId = String(exec.callId)
+
       return new Promise((resolve, reject) => {
         const cleanup = () => {
           try { rmSync(tmpDir, { recursive: true, force: true }) } catch (e) { /* ignore */ }
@@ -319,12 +379,25 @@ The KernelAgent tool card displays available generated source files and per-file
           BRIDGE, '--mode', args.mode,
           '--input', inputPath,
           '--output', outputPath,
-        ], { cwd: CWD, signal: exec.signal })
+        ], { 
+          cwd: CWD, 
+          signal: exec.signal,
+          // Bridge progress goes to pipes; without this Python may fully-buffer
+          // stdout until exit and the live card stays empty during long runs.
+          env: { ...process.env, PYTHONUNBUFFERED: '1' },
+        })
 
-        let stderr = ''
-        proc.stderr?.on('data', (chunk) => { stderr += chunk })
-        proc.on('error', (err) => { cleanup(); reject(err) })
+        const seed = `[kernelagent] starting mode=${String(args.mode)}\n`
+        const liveLog = attachLiveLogPublisher(ctx, sessionId, callId, proc, seed)
+        liveLog.flush()
+        proc.on('error', (err) => {
+          liveLog.flush()
+          cleanup()
+          reject(err)
+        })
         proc.on('close', (code) => {
+          liveLog.flush()
+          const stderr = liveLog.getStderr()
           // For run_example, always try to read output.json even if bridge exited non-zero,
           // because bridge may have written fallback results during exception handling.
           if (args.mode === 'run_example' || code === 0) {
@@ -356,3 +429,4 @@ The KernelAgent tool card displays available generated source files and per-file
   ctx.tools.register(toolDef)
   console.log('[kernelagent-tool] registered (from-git)')
 }
+

@@ -24,6 +24,7 @@ export const API_REMOTE_FORWARDED_EVENTS = [
   'cordis/dynamic-retract',
   'cordis/inspect-query',
   'cordis/inspect-query-resolved',
+  'kernelagent/log',
   'llm/adapters-updated',
   'settings/document-updated',
 ] as const
