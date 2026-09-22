@@ -2,11 +2,3 @@
     - id: deepseek-chat-tool
       name: './deepseek-chat-tool.ts'
       disabled: !!js '!process.env.DEEPSEEK_API_KEY'
-    - id: kernelagent-describe-tool
-      name: './kernelagent-describe-tool.ts'
-    - id: kernel-agent-tool
-      name: './kernelagent-tool.ts'
-    - id: kernelagent-config-tool
-      name: './kernelagent-config-tool.ts'
-    - id: kernelagent-injector-tool
-      name: './kernelagent-injector-tool.ts'

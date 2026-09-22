@@ -87,53 +87,6 @@ export function ValueField(props: FieldProps & {
   )
 }
 
-/** A staged string field constrained to a fixed set of values. */
-export function SelectField(props: FieldProps & {
-  /** Exact wire values accepted by the server-side settings schema. */
-  options: readonly string[]
-}) {
-  return (
-    <div className={css.field}>
-      <div className={css.head}>
-        <label className={css.label} htmlFor={props.id}>{props.label}</label>
-        {props.overridden
-          ? (
-            <span className={css.badges}>
-              <span className={css.badge}>{props.overriddenLabel}</span>
-              <button
-                type="button"
-                className={css.reset}
-                disabled={props.disabled}
-                onClick={props.onReset}
-              >
-                {props.resetLabel}
-              </button>
-            </span>
-          )
-          : null}
-      </div>
-      <select
-        id={props.id}
-        className={props.invalid ? css.inputInvalid : css.input}
-        {...props.invalid ? { 'aria-invalid': true } : {}}
-        value={props.text}
-        disabled={props.disabled}
-        onChange={(event) => { props.onEdit(event.target.value) }}
-      >
-        {props.invalid && !props.options.includes(props.text)
-          ? <option value={props.text}>{props.text}</option>
-          : null}
-        {props.options.map(option => (
-          <option key={option} value={option}>{option}</option>
-        ))}
-      </select>
-      <p className={props.invalid ? css.invalid : css.hint}>
-        {props.invalid ? props.invalidLabel : props.hint}
-      </p>
-    </div>
-  )
-}
-
 /**
  * A write-only credential control. The value never rides a response, so the
  * control reports only whether one is configured and starts blank; a blank
@@ -165,53 +118,6 @@ export function SecretField(props: Pick<FieldProps, 'id' | 'label' | 'hint' | 't
         onChange={(event) => { props.onEdit(event.target.value) }}
       />
       <p className={css.hint}>{props.hint}</p>
-    </div>
-  )
-}
-
-/**
- * A staged boolean field rendered as a checkbox.
- * @param props - the field's copy, its staged value, and the edit actions.
- * @returns the labelled control.
- */
-export function BooleanField(props: Pick<FieldProps, 'id' | 'label' | 'hint' | 'text' | 'overridden' | 'disabled' | 'onEdit' | 'onReset'> & {
-  /** Copy for the overridden badge. */
-  overriddenLabel: string
-  /** Copy for the reset control. */
-  resetLabel: string
-}) {
-  const checked = props.text.trim().toLowerCase() === 'true'
-  return (
-    <div className={css.field}>
-      <div className={css.head}>
-        <label className={css.label} htmlFor={props.id}>{props.label}</label>
-        {props.overridden
-          ? (
-            <span className={css.badges}>
-              <span className={css.badge}>{props.overriddenLabel}</span>
-              <button
-                type="button"
-                className={css.reset}
-                disabled={props.disabled}
-                onClick={props.onReset}
-              >
-                {props.resetLabel}
-              </button>
-            </span>
-          )
-          : null}
-      </div>
-      <label className={css.checkboxRow}>
-        <input
-          id={props.id}
-          className={css.checkbox}
-          type="checkbox"
-          checked={checked}
-          disabled={props.disabled}
-          onChange={(event) => { props.onEdit(String(event.target.checked)) }}
-        />
-        <span className={css.checkboxLabel}>{props.hint}</span>
-      </label>
     </div>
   )
 }

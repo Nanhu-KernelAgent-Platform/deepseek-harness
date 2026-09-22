@@ -23,19 +23,16 @@ import type * as Md from 'mdast'
 import type {} from 'mdast-util-math'
 import { normalizeUri } from 'micromark-util-sanitize-uri'
 import { CodeBlock } from './CodeBlock.tsx'
-import { PerfChartBlock } from './PerfChartBlock.tsx'
 import { renderTexToReact } from './katex.tsx'
 import type { PositionedBlock } from './incremental.ts'
 import css from './MarkdownText.module.css'
 
-/** Copy-button and download-button labels forwarded to fence CodeBlocks (this package is cordis-free, so labels arrive via props). */
+/** Copy-button labels forwarded to fence CodeBlocks (this package is cordis-free, so copy arrives via props). */
 export interface MarkdownCodeLabels {
   /** Copy-button idle label. */
   copyLabel?: string | undefined
   /** Copy-button label during the post-copy confirmation window. */
   copiedLabel?: string | undefined
-  /** Download-button idle label. */
-  downloadLabel?: string | undefined
 }
 
 function sanitizeUrl(url: string): string {
@@ -319,11 +316,6 @@ function renderCode(node: Md.Code, key: Key, context: MarkdownRenderContext): Re
   // The replaced pipeline recovered the grammar id from the hast class with
   // /language-([\w-]+)/, which truncates at the first non-word character.
   const lang = language === undefined ? undefined : /^[\w-]+/.exec(language)?.[0]
-  // Extract file name from info string using "lang:filename" convention (e.g. "c:kernel.mu").
-  const fileName = language === undefined ? undefined : /^[\w-]+:(.+)$/.exec(language)?.[1]
-  if (!context.streaming && lang === 'perfchart') {
-    return <PerfChartBlock key={key} dataJson={node.value} />
-  }
   if (!context.streaming && lang === 'math') {
     // ```math fences render as display TeX once settled (rehype-katex parity);
     // its text extraction saw the code block's trailing newline.
@@ -339,8 +331,6 @@ function renderCode(node: Md.Code, key: Key, context: MarkdownRenderContext): Re
       lang={context.streaming ? undefined : lang}
       copyLabel={context.codeLabels?.copyLabel}
       copiedLabel={context.codeLabels?.copiedLabel}
-      downloadLabel={context.codeLabels?.downloadLabel}
-      fileName={fileName}
     />
   )
 }

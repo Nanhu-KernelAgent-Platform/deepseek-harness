@@ -1,15 +1,16 @@
-# KernelAgent integration
+# Local scratch tools
 
 English | [中文](README.zh.md)
 
-The settings card is the source of model, backend and generation options. Each tool call reads current settings and resolves credentials before launching Python. No config.json or process-global credential synchronization is used.
+This directory now contains only the optional local `deepseek-chat` development tool. `resolve-patch.mjs` converts its source-relative overlay into an absolute temporary patch used by `start_dsh.sh`.
 
-Run `pnpm run build` after changing client sources, then `./start_dsh.sh`. The launcher resolves the patch template to a temporary file because the loader resolves relative plugin names against the profile directory. Set `DSH_PORT` to change the listening port.
+KernelAgent is maintained as the independent `dsh-kernelagent` bundle next to this repository. Install it into the Web profile once before starting Harness:
 
-`KERNELAGENT_WORKING_DIR` selects the KernelAgent checkout (default: the sibling KernelAgent-from-git directory); `KERNELAGENT_PYTHON` selects its Python environment. The versioned bridge is `kernelagent_bridge.py` here; `KERNELAGENT_BRIDGE` optionally selects another bridge. Credentials come from the settings card or its configured credential reference. The optional DeepSeek chat tool uses DEEPSEEK_API_KEY.
+```sh
+pnpm dsh plugin --profile web add ../dsh-kernelagent
+./start_dsh.sh
+```
 
-Generated files are stored in tool presentation metadata and displayed with per-file downloads. Only the concise status reaches the next model request. A request for backward or gradients is prepared as one bound forward/backward reference, then one generate call creates, verifies, and binds the complete native bundle; automatic optimization then runs separate forward and backward passes with direction-specific latency and MCU measurements. Generate reports correctness without adding benchmarks; optimize reports existing optimization measurements. Historical Markdown reports remain readable. The legacy run_example mode can return cached fallback artifacts and is not evidence of a fresh successful optimization; synthetic charts are not emitted.
+The external bundle owns Describe, Pipeline, Engine, Injector, their Python bridges, and their tests. `KERNELAGENT_WORKING_DIR` selects the KernelAgent checkout; `KERNELAGENT_PYTHON` selects its Python environment. The bundled bridges are used automatically.
 
-With automatic injection enabled, a verified final bundle is persisted under the active Workspace at `.kernelagent/artifacts/<content-hash>/best_bundle`. The injector resolves relative deployment and training-script paths from that Workspace; an empty deployment setting uses `.kernelagent/runtime`. `KERNELAGENT_WORKING_DIR` remains the KernelAgent checkout and is not treated as the user Workspace.
-
-Run plugin tests with `pnpm vitest run --config scratch-plugin/vitest.config.mts`.
+The optional local chat tool reads `DEEPSEEK_API_KEY`. If the variable is unset, `start_dsh.sh` may load it from the ignored `scratch-plugin/src/secrets.json` file.

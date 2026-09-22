@@ -4,27 +4,13 @@
 export type PluginsSettingsLocaleKey =
   | 'nav' | 'title' | 'intro' | 'tabs' | 'configurableTab' | 'empty'
   | 'overridden' | 'reset' | 'readOnly' | 'expand' | 'collapse'
-  | 'save' | 'saving' | 'discard' | 'unsaved' | 'saveFailed' | 'invalidNumber' | 'invalidValue'
+  | 'save' | 'saving' | 'discard' | 'unsaved' | 'saveFailed' | 'invalidNumber'
   | 'bashTitle' | 'bashDescription' | 'bashTimeoutMs' | 'bashTimeoutMsHint'
   | 'bashMaxOutputBytes' | 'bashMaxOutputBytesHint'
   | 'agentLoopTitle' | 'agentLoopDescription' | 'agentLoopMaxParallel' | 'agentLoopMaxParallelHint'
   | 'webSearchTitle' | 'webSearchDescription'
   | 'webSearchApiKey' | 'webSearchApiKeyHint' | 'webSearchApiKeySet' | 'webSearchApiKeyUnset'
   | 'webSearchBaseUrl' | 'webSearchBaseUrlHint' | 'webSearchMaxUses' | 'webSearchMaxUsesHint'
-  | 'configToolTitle' | 'configToolDescription'
-  | 'configToolApiKey' | 'configToolApiKeyHint'
-  | 'configToolModelName' | 'configToolModelNameHint'
-  | 'configToolBaseUrl' | 'configToolBaseUrlHint'
-  | 'configToolWorkers' | 'configToolWorkersHint'
-  | 'configToolAutoOptimize' | 'configToolAutoOptimizeHint'
-  | 'configToolGenerationMaxRounds' | 'configToolGenerationMaxRoundsHint'
-  | 'configToolMaxRounds' | 'configToolMaxRoundsHint'
-  | 'configToolPlatform' | 'configToolPlatformHint'
-  | 'configToolKernelBackend' | 'configToolKernelBackendHint'
-  | 'configToolStrategy' | 'configToolStrategyHint'
-  | 'configToolReasoningEffort' | 'configToolReasoningEffortHint'
-  | 'configToolVerify' | 'configToolVerifyHint'
-  | 'configToolExperienceMemory' | 'configToolExperienceMemoryHint'
 
 /** English copy. */
 export const en: Record<PluginsSettingsLocaleKey, string> = {
@@ -45,7 +31,6 @@ export const en: Record<PluginsSettingsLocaleKey, string> = {
   unsaved: 'Unsaved',
   saveFailed: 'The deployment did not accept these values; they were left for you to correct.',
   invalidNumber: 'Enter a number, or leave blank to use the default.',
-  invalidValue: 'Choose one of the supported values.',
   bashTitle: 'Shell',
   bashDescription: 'Limits every command the agent runs.',
   bashTimeoutMs: 'Command timeout (ms)',
@@ -66,34 +51,6 @@ export const en: Record<PluginsSettingsLocaleKey, string> = {
   webSearchBaseUrlHint: 'Leave blank to use the provider default.',
   webSearchMaxUses: 'Max searches per request',
   webSearchMaxUsesHint: 'How many times one request may search before it must answer.',
-  configToolTitle: 'KernelAgent Tool Config',
-  configToolDescription: 'KernelAgent GPU kernel optimizer settings: LLM API key, model, endpoint, and optimization parameters.',
-  configToolApiKey: 'API key',
-  configToolApiKeyHint: 'Stored in plain text in the settings file for this deployment.',
-  configToolModelName: 'Model name',
-  configToolModelNameHint: 'Any model id your endpoint accepts, e.g. deepseek-chat, gpt-4o, or grok-4.6.',
-  configToolBaseUrl: 'API endpoint',
-  configToolBaseUrlHint: 'OpenAI-compatible chat-completions URL.',
-  configToolWorkers: 'Workers',
-  configToolWorkersHint: 'Parallel optimization threads (1–16).',
-  configToolAutoOptimize: 'Optimize after generation',
-  configToolAutoOptimizeHint: 'Automatically optimize a verified generated kernel. Retain it if optimization fails.',
-  configToolGenerationMaxRounds: 'Generation refinement rounds',
-  configToolGenerationMaxRoundsHint: 'Maximum rounds to repair generation or correctness failures (1–50).',
-  configToolMaxRounds: 'Optimization rounds',
-  configToolMaxRoundsHint: 'Maximum optimization iterations (1–50).',
-  configToolPlatform: 'Platform',
-  configToolPlatformHint: 'Target GPU platform: cuda / musa / xpu.',
-  configToolKernelBackend: 'Kernel backend',
-  configToolKernelBackendHint: 'Code generation backend: triton / musa.',
-  configToolStrategy: 'Strategy',
-  configToolStrategyHint: 'Search strategy: beam_search / greedy.',
-  configToolReasoningEffort: 'Reasoning effort',
-  configToolReasoningEffortHint: 'OpenAI-compatible effort: none / low / medium / high / xhigh / max.',
-  configToolVerify: 'Correctness verification',
-  configToolVerifyHint: 'Verify generated output in flows that expose this switch.',
-  configToolExperienceMemory: 'Experience memory',
-  configToolExperienceMemoryHint: 'Reuse locally stored verified kernel experience.',
 }
 
 /** Simplified Chinese copy. */
@@ -114,7 +71,6 @@ export const zh: Record<PluginsSettingsLocaleKey, string> = {
   discard: '放弃修改',
   unsaved: '未保存',
   saveFailed: '本部署没有接受这些值，已保留供你修改。',
-  invalidValue: '请选择受支持的选项。',
   invalidNumber: '请填数字；留空表示使用默认值。',
   bashTitle: '终端',
   bashDescription: '限制 agent 运行的每一条命令。',
@@ -136,32 +92,4 @@ export const zh: Record<PluginsSettingsLocaleKey, string> = {
   webSearchBaseUrlHint: '留空则使用提供方默认地址。',
   webSearchMaxUses: '单次请求最多搜索次数',
   webSearchMaxUsesHint: '一次请求在必须作答前最多可以搜索多少次。',
-  configToolTitle: 'KernelAgent 工具配置',
-  configToolDescription: 'KernelAgent GPU Kernel 优化器配置：LLM API Key、模型、接口地址与优化参数。',
-  configToolApiKey: 'API Key',
-  configToolApiKeyHint: '以明文保存到本部署的 settings 配置文件。',
-  configToolModelName: '模型名称',
-  configToolModelNameHint: '接口支持的任意模型 ID，如 deepseek-chat、gpt-4o、grok-4.6。',
-  configToolBaseUrl: 'API 地址',
-  configToolBaseUrlHint: 'OpenAI 兼容的 chat-completions 接口 URL。',
-  configToolWorkers: '工作线程数',
-  configToolWorkersHint: '并行优化的工作线程数（1–16）。',
-  configToolAutoOptimize: '生成后自动优化',
-  configToolAutoOptimizeHint: '生成并通过正确性验证后自动优化；优化失败时保留已验证的生成结果。',
-  configToolGenerationMaxRounds: '生成纠错轮数',
-  configToolGenerationMaxRoundsHint: '生成或正确性验证失败时，最多修正多少轮（1–50）。',
-  configToolMaxRounds: '性能优化轮数',
-  configToolMaxRoundsHint: '最多执行多少轮优化迭代（1–50）。',
-  configToolPlatform: '目标平台',
-  configToolPlatformHint: '目标 GPU 平台：cuda / musa / xpu。',
-  configToolKernelBackend: 'Kernel 后端',
-  configToolKernelBackendHint: '代码生成后端：triton / musa。',
-  configToolStrategy: '搜索策略',
-  configToolStrategyHint: '优化搜索策略：beam_search / greedy。',
-  configToolReasoningEffort: '推理强度',
-  configToolReasoningEffortHint: 'OpenAI 兼容等级：none / low / medium / high / xhigh / max。',
-  configToolVerify: '正确性验证',
-  configToolVerifyHint: '在支持该开关的流程中验证生成结果。',
-  configToolExperienceMemory: '经验记忆',
-  configToolExperienceMemoryHint: '复用本地保存且验证通过的 Kernel 经验。',
 }

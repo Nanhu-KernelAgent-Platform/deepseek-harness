@@ -110,7 +110,6 @@
     "packages/client/tsdown.client.ts",
     "scripts/*.client.spec.ts",
     "scripts/client-bundle-css.spec.ts",
-    "scripts/kernelagent-workflow.spec.ts",
     "packages/typert/generator/tests/fixtures/**",
     "scripts/client-bundle-purity.spec.ts"
   ],

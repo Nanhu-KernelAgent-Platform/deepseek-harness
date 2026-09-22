@@ -685,24 +685,3 @@ describe('ConfigurablePluginsTabController', () => {
       .toEqual({ loaded: true, namespaces: [] })
   })
 })
-
-describe('KernelAgent workflow settings', () => {
-  it('stages and saves automatic optimization independently of both round budgets', async () => {
-    const { ConfigToolCardController } = await import('../src/client/kernelagent-config-card-controller.ts')
-    const host = stubSettingsScope<Record<string, unknown>>()
-    host.publish({ status: 'ready', writable: true,
-      value: { autoOptimize: false, generationMaxRounds: 8, maxRounds: 8 },
-      base: { autoOptimize: false, generationMaxRounds: 8, maxRounds: 8 }, user: {} })
-    acceptWrites(host)
-    const face = new ConfigToolCardController(host.scope).inject()
-    face.edit('autoOptimize', 'true')
-    face.edit('generationMaxRounds', '3')
-    face.edit('maxRounds', '7')
-    expect(host.set).not.toHaveBeenCalled()
-    face.save()
-    await vi.waitFor(() => { expect(host.set).toHaveBeenCalledTimes(3) })
-    expect(host.set).toHaveBeenCalledWith('autoOptimize', true)
-    expect(host.set).toHaveBeenCalledWith('generationMaxRounds', 3)
-    expect(host.set).toHaveBeenCalledWith('maxRounds', 7)
-  })
-})

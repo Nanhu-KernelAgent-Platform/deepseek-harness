@@ -9,7 +9,6 @@
     "src/agent-lookup.ts",
     "src/index.ts",
     "src/invariant.ts",
-    "src/kernelagent-live.ts",
     "src/remote-events.ts",
     "src/types.ts"
   ],

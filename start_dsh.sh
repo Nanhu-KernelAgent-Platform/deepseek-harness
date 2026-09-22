@@ -6,26 +6,6 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_DIR="${1:-${SCRIPT_DIR}}"
 cd "${HARNESS_DIR}"
 
-# KernelAgent runtime paths (inject into DSH Node process)
-export KERNELAGENT_PYTHON="${KERNELAGENT_PYTHON:-python3}"
-export KERNELAGENT_BRIDGE="${KERNELAGENT_BRIDGE:-${HARNESS_DIR}/scratch-plugin/kernelagent_bridge.py}"
-export KERNELAGENT_WORKING_DIR="${KERNELAGENT_WORKING_DIR:-${HARNESS_DIR}/../KernelAgent-from-git}"
-# KernelAgent-injector (third plugin, batch-1 MVP): deploy best_bundle into a
-# managed runtime store and register torch.ops.kernelagent::<op>.
-export KERNELAGENT_INJECTOR_BRIDGE="${KERNELAGENT_INJECTOR_BRIDGE:-${HARNESS_DIR}/scratch-plugin/kernelagent_injector_bridge.py}"
-export KERNELAGENT_RUNTIME_STORE="${KERNELAGENT_RUNTIME_STORE:-${KERNELAGENT_WORKING_DIR}/runtime_store}"
-# Directory that holds the training/test scripts 
-export KERNELAGENT_TRAIN_DIR="${KERNELAGENT_TRAIN_DIR:-${HARNESS_DIR}/../train}"
-
-if [[ ! -f "${KERNELAGENT_BRIDGE}" ]]; then
-  echo "KernelAgent bridge not found: ${KERNELAGENT_BRIDGE}" >&2
-  exit 1
-fi
-
-if [[ ! -d "${KERNELAGENT_WORKING_DIR}" ]]; then
-  echo "KernelAgent checkout not found: ${KERNELAGENT_WORKING_DIR}" >&2
-  exit 1
-fi
 
 if [[ -z "${DEEPSEEK_API_KEY:-}" && -f ./scratch-plugin/src/secrets.json ]]; then
   export DEEPSEEK_API_KEY
@@ -36,7 +16,7 @@ if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
   echo "DEEPSEEK_API_KEY is not set; the optional deepseek-chat tool will be disabled." >&2
 fi
 
-PATCH_FILE="$(mktemp "${TMPDIR:-/tmp}/kernelagent-patch.XXXXXX.yml")"
+PATCH_FILE="$(mktemp "${TMPDIR:-/tmp}/local-tools-patch.XXXXXX.yml")"
 trap 'rm -f -- "$PATCH_FILE"' EXIT
 node "${HARNESS_DIR}/scratch-plugin/resolve-patch.mjs" > "$PATCH_FILE"
 pnpm dsh web --patch "$PATCH_FILE" --port "${DSH_PORT:-7890}"
